@@ -1,0 +1,28 @@
+node_modules/
+*.log
+*.tgz
+.DS_Store
+Thumbs.db
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+*.local
+*.pem
+*.key
+*.p12
+
+# Editors and tools
+.vscode/
+.idea/
+.history/
+.cache/
+
+# Build and test artifacts
+dist/
+lib/
+coverage/
+*.tsbuildinfo
+pnpm-debug.log*
+.pnpm-store/

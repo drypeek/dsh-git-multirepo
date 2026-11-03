@@ -1,0 +1,57 @@
+{
+  "name": "dsh-git-multirepo",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "description": "Read every git repository in a DSH workspace as one merged commit timeline.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "git",
+    "git-log",
+    "multi-repo",
+    "monorepo"
+  ],
+  "author": "drypeek (https://github.com/drypeek)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/drypeek/dsh-git-multirepo.git"
+  },
+  "homepage": "https://github.com/drypeek/dsh-git-multirepo#readme",
+  "bugs": {
+    "url": "https://github.com/drypeek/dsh-git-multirepo/issues"
+  },
+  "engines": {
+    "node": ">=20",
+    "dsh": ">=0.2.1-rc.5"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "SECURITY.md"
+  ],
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-sidebar-right"
+      ]
+    }
+  }
+}

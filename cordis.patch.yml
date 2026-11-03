@@ -1,0 +1,3 @@
+- insert:
+    - id: git-multirepo
+      name: 'dsh-git-multirepo'

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Multi-repo Git log",
+    "description": "Merges every nested git repository in the workspace into a single commit timeline, so several repositories can be read at once."
+  }
+}
