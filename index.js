@@ -20,14 +20,21 @@ const FIELD_SEP = '\u0000'
 const MAX_BUFFER = 16 * 1024 * 1024
 /** 单次扫描最多发现的仓库数，避免超大工作区拖垮请求。 */
 const MAX_REPOS = 100
-/** 扫描工作区时跳过的目录名。 */
+/** 单次扫描最多访问的目录数；超过后停止遍历，避免巨型目录树拖垮请求。 */
+const MAX_DIRS = 20000
+/** 提交详情最多返回的变更文件数；超出后截断并置 filesTruncated。 */
+const MAX_FILES = 500
+/**
+ * 扫描工作区时跳过的目录名。
+ * 全部是构建产物或依赖目录；不包含 `packages`——monorepo 的 `packages/` 下
+ * 也可能放着独立仓库，README 承诺发现工作区内所有仓库。
+ */
 const SKIP_DIRS = new Set([
   'node_modules',
   'bin',
   'obj',
   'dist',
   'target',
-  'packages',
   '.vs',
   '.svn',
   '.idea',
@@ -35,6 +42,8 @@ const SKIP_DIRS = new Set([
 /**
  * 读取类 git 命令的安全覆盖项：压住仓库本地 config 中可能执行外部程序的键。
  * 这是本插件面对"工作区内存在不受信任仓库"的主要防线之一。
+ * filter/diff driver 的键名因仓库而异，无法写死：readOnlyConfigNeutralisers()
+ * 会在每个仓库上枚举并追加 `-c <key>=`，见该函数。
  */
 const READ_CONFIG_OVERRIDES = [
   '-c',
@@ -54,6 +63,8 @@ const READ_CONFIG_OVERRIDES = [
 const FETCH_CONFIG_OVERRIDES = ['-c', 'core.fsmonitor=false', '-c', 'protocol.ext.allow=never']
 /** 单仓库 fetch 超时。 */
 const FETCH_TIMEOUT_MS = 60000
+/** 一次 fetch 请求的总时限：到点后中止剩余仓库。 */
+const FETCH_TOTAL_TIMEOUT_MS = 120000
 /** fetch 并发数。 */
 const FETCH_CONCURRENCY = 4
 /** 扫描仓库的并发数，避免同时拉起大量 git 进程。 */
@@ -80,26 +91,13 @@ const LOG_FORMAT = '--pretty=format:%H%x00%h%x00%an%x00%aI%x00%s%x00%D%x00%S%x00
 const PATCH_LINE_LIMIT = 5000
 /** 差异中单行的最大字符数。 */
 const PATCH_LINE_CHARS = 2000
-/** 差异内容中需要跳过的元信息行前缀。 */
-const DIFF_META_PREFIXES = [
-  'diff --git',
-  'index ',
-  '--- ',
-  '+++ ',
-  'new file mode',
-  'deleted file mode',
-  'old mode',
-  'new mode',
-  'similarity index',
-  'dissimilarity index',
-  'rename from',
-  'rename to',
-]
 
 /** 工作区状态缓存，键为根目录加查询条件。 */
 const stateCache = new Map()
 /** 提交详情缓存，键为仓库路径加提交哈希。 */
 const commitCache = new Map()
+/** 进行中的 fetch，键为工作区根目录；同一工作区同时只允许一个。 */
+const fetchLocks = new Map()
 
 export const inject = ['connection', 'workspaceRegistry']
 
@@ -186,11 +184,11 @@ const READ_ENV_KEYS = [
   'LANG',
   'LC_ALL',
   'LC_CTYPE',
-  'SSH_AUTH_SOCK',
 ]
 
 /**
  * 只读命令的环境变量：白名单 + 固定的 git 变量。
+ * 不继承凭据类变量（含 SSH_AUTH_SOCK）：只读命令从不需要联网。
  */
 function readEnv() {
   const env = {}
@@ -201,6 +199,51 @@ function readEnv() {
   env.GIT_TERMINAL_PROMPT = '0'
   env.GIT_OPTIONAL_LOCKS = '0'
   env.GIT_ALLOW_PROTOCOL = 'file:git:ssh:http:https'
+  // 关闭 pathspec magic（`:()`、`*`、`!` 等），file 参数只按字面路径匹配。
+  env.GIT_LITERAL_PATHSPECS = '1'
+  return env
+}
+
+/**
+ * fetch 子进程额外需要的变量：凭据助手、SSH 代理与 Windows 系统路径。
+ * fetch 必须能用用户既有的凭据配置，但不能继承宿主的任意环境变量
+ * （DSH 进程里可能有 API key / token）。
+ */
+const FETCH_ENV_KEYS = [
+  ...READ_ENV_KEYS,
+  'SSH_AUTH_SOCK',
+  'SSH_AGENT_PID',
+  'SSH_ASKPASS',
+  'GIT_ASKPASS',
+  'GIT_SSH',
+  'GIT_SSH_COMMAND',
+  'GIT_CONFIG_COUNT',
+  'GIT_CONFIG_GLOBAL',
+  'GIT_CONFIG_SYSTEM',
+  'GIT_CONFIG_NOSYSTEM',
+  'GIT_CONFIG_PARAMETERS',
+  'GCM_INTERACTIVE',
+  'WSLENV',
+  'DISPLAY',
+  'USERNAME',
+  'USERDOMAIN',
+  'PROGRAMDATA',
+]
+/** `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` 允许调用方把配置注入子进程。 */
+const FETCH_ENV_DYNAMIC = /^GIT_CONFIG_(?:KEY|VALUE)_\d+$/
+/**
+ * fetch 命令的环境变量：显式白名单 + 动态注入的 git 配置变量。
+ */
+function fetchEnv() {
+  const env = {}
+  for (const key of FETCH_ENV_KEYS) {
+    const value = process.env[key]
+    if (value !== undefined) env[key] = value
+  }
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined && FETCH_ENV_DYNAMIC.test(key)) env[key] = value
+  }
+  env.GIT_TERMINAL_PROMPT = '0'
   return env
 }
 
@@ -208,14 +251,16 @@ function readEnv() {
  * 执行一条 git 命令，失败不抛出。
  * @param {string[]} args 参数数组，不经过 shell。
  * @param {string} cwd 仓库目录。
- * @param {{ timeout?: number, signal?: AbortSignal, network?: boolean }} [options] 超时、取消与是否联网。
+ * @param {{ timeout?: number, signal?: AbortSignal, network?: boolean, overrides?: string[] }} [options]
+ *   超时、取消、是否联网，以及追加在固定覆盖项之后的额外 `-c` 覆盖项。
  */
 function git(args, cwd, options = {}) {
   const network = options.network === true
+  const overrides = options.overrides ?? []
   return new Promise((resolve) => {
     execFile(
       'git',
-      [...(network ? FETCH_CONFIG_OVERRIDES : READ_CONFIG_OVERRIDES), ...args],
+      [...(network ? FETCH_CONFIG_OVERRIDES : READ_CONFIG_OVERRIDES), ...overrides, ...args],
       {
         cwd,
         encoding: 'utf8',
@@ -223,11 +268,52 @@ function git(args, cwd, options = {}) {
         windowsHide: true,
         timeout: options.timeout ?? 20000,
         signal: options.signal,
-        env: network ? { ...process.env, GIT_TERMINAL_PROMPT: '0' } : readEnv(),
+        env: network ? fetchEnv() : readEnv(),
       },
       (error, stdout) => {
         if (error) resolve({ ok: false, message: String(error.message ?? error) })
         else resolve({ ok: true, stdout })
+      },
+    )
+  })
+}
+
+/**
+ * 枚举仓库本地配置里可能执行外部程序的键，返回把它们置空的 `-c key=` 覆盖项。
+ * git status 在需要把工作区内容转换回 git 对象时会执行 filter driver
+ * （`.gitattributes` 选中的 `filter.<driver>.clean` / `.process`），因此只读
+ * 扫描也必须先中和这些键；键名因仓库而异，只能在每个仓库上枚举。
+ * 这里只读 `git config`，不会执行任何配置里的程序。
+ * @param {string} repo 仓库目录。
+ * @returns {Promise<string[]>} 追加到只读命令上的 `-c` 覆盖项。
+ */
+function readOnlyConfigNeutralisers(repo) {
+  const pattern = '^(filter\\..*\\.(clean|smudge|process)|diff\\..*\\.(command|textconv)|diff\\.external)$'
+  return new Promise((resolve) => {
+    execFile(
+      'git',
+      ['config', '--local', '--includes', '--get-regexp', pattern],
+      {
+        cwd: repo,
+        encoding: 'utf8',
+        maxBuffer: 1024 * 1024,
+        windowsHide: true,
+        timeout: 5000,
+        env: readEnv(),
+      },
+      (error, stdout) => {
+        // 退出码 1 表示没有任何匹配项（正常情况）；其他错误交给后续 git 命令自己报告。
+        if (error) {
+          resolve([])
+          return
+        }
+        const overrides = []
+        for (const line of String(stdout).split('\n')) {
+          const key = line.trim().split(/\s+/)[0]
+          if (key === '' || overrides.includes(key)) continue
+          overrides.push('-c', `${key}=`)
+        }
+        resolve(overrides)
       },
     )
   })
@@ -294,31 +380,63 @@ function resolveWorkspaceRoot(value) {
 }
 
 /**
- * 判断目录自身是否就是一个仓库根（工作树以及链接工作树的 `.git` 文件都算）。
- * 用于阻止 git 向上发现工作区之外的仓库。
+ * 判断目录自身是否就是一个有效仓库的根（工作树以及链接工作树的 `.git` 文件都算）。
+ * 仅看 `.git` 是否存在不够：`.git` 是无效目录时 git 会向**上**发现父仓库，
+ * 从而越过工作区边界读写父仓库；这里用 rev-parse --show-toplevel 校验真实根。
  * @param {string} repo 目录。
+ * @returns {Promise<boolean>} 目录就是该仓库的根时为 true。
  */
-function isGitRepoRoot(repo) {
-  return existsSync(path.join(repo, '.git'))
+async function isGitRepoRoot(repo) {
+  const expected = canonicalPath(repo)
+  if (expected === null) return false
+  const result = await git(['rev-parse', '--show-toplevel'], repo, { timeout: 10000 })
+  if (!result.ok) return false
+  const actual = canonicalPath(result.stdout.trim())
+  return actual !== null && actual === expected
+}
+
+/**
+ * 过滤掉"看似仓库、实际会回退到父仓库"的目录，并保留被跳过项供 fetch 报告。
+ * @param {string[]} repos 待校验目录。
+ * @returns {Promise<{ repos: string[], skipped: string[] }>} 通过/跳过项。
+ */
+async function filterRepoRoots(repos) {
+  const checked = await Promise.all(
+    repos.map(async (repo) => ({ repo, root: await isGitRepoRoot(repo) })),
+  )
+  return {
+    repos: checked.filter((item) => item.root).map((item) => item.repo),
+    skipped: checked.filter((item) => !item.root).map((item) => item.repo),
+  }
 }
 
 /**
  * 收集工作区内所有 git 仓库，含根自身与嵌套仓库。
  * @param {string} root 工作区目录。
  * @param {number} maxDepth 最大递归深度。
+ * @returns {Promise<{ repos: string[], truncated: boolean }>} 发现的仓库与是否因上限截断。
  */
 async function discoverRepos(root, maxDepth) {
   const repos = []
   const seen = new Set()
+  let visited = 0
+  let truncated = false
 
   async function walk(dir, depth) {
-    if (repos.length >= MAX_REPOS) return
+    if (repos.length >= MAX_REPOS || visited >= MAX_DIRS) {
+      truncated = true
+      return
+    }
     const current = path.resolve(dir)
     if (seen.has(current)) return
     seen.add(current)
+    visited += 1
     if (existsSync(path.join(current, '.git'))) {
       repos.push(current)
-      if (repos.length >= MAX_REPOS) return
+      if (repos.length >= MAX_REPOS) {
+        truncated = true
+        return
+      }
     }
     if (depth >= maxDepth) return
     let entries
@@ -328,7 +446,10 @@ async function discoverRepos(root, maxDepth) {
       return
     }
     for (const entry of entries) {
-      if (repos.length >= MAX_REPOS) return
+      if (repos.length >= MAX_REPOS || visited >= MAX_DIRS) {
+        truncated = true
+        return
+      }
       if (!entry.isDirectory()) continue
       if (entry.name.startsWith('.') || SKIP_DIRS.has(entry.name)) continue
       await walk(path.join(current, entry.name), depth + 1)
@@ -336,7 +457,7 @@ async function discoverRepos(root, maxDepth) {
   }
 
   await walk(root, 0)
-  return repos
+  return { repos, truncated }
 }
 
 /**
@@ -352,8 +473,6 @@ async function readRepo(repo, root, limit, allBranches, signal) {
   const name = relative === '' ? path.basename(root) : relative.split(path.sep).join('/')
 
   const logArgs = [
-    '-c',
-    'core.quotepath=false',
     'log',
     LOG_FORMAT,
     '--source',
@@ -364,8 +483,11 @@ async function readRepo(repo, root, limit, allBranches, signal) {
   if (allBranches) logArgs.push('--all')
   else logArgs.push('HEAD')
 
+  // git status 的工作区内容转换可能执行仓库配置里的 filter driver，
+  // 因此先枚举并中和该仓库本地的 filter/diff 配置键（只读命令里唯一的执行面）。
+  const neutralisers = await readOnlyConfigNeutralisers(repo)
   const [statusResult, logResult] = await Promise.all([
-    git(['status', '--porcelain=v1', '-uno', '--branch'], repo, { signal }),
+    git(['status', '--porcelain=v1', '-uno', '--branch'], repo, { signal, overrides: neutralisers }),
     git(logArgs, repo, { signal }),
   ])
 
@@ -392,7 +514,11 @@ async function readRepo(repo, root, limit, allBranches, signal) {
           }
         }
       } else if (rest !== '') {
-        branch = rest.startsWith('HEAD') ? 'HEAD' : rest
+        if (rest.startsWith('No commits yet on ')) {
+          branch = rest.slice('No commits yet on '.length)
+        } else {
+          branch = rest.startsWith('HEAD') ? 'HEAD' : rest
+        }
       }
     }
     dirty = lines.slice(1).some((line) => line.trim() !== '')
@@ -403,8 +529,6 @@ async function readRepo(repo, root, limit, allBranches, signal) {
   if (!allBranches && upstreamRef !== '' && upstream !== null && upstream.behind > 0) {
     const extra = Math.min(upstream.behind, REMOTE_EXTRA_LIMIT)
     const extendedArgs = [
-      '-c',
-      'core.quotepath=false',
       'log',
       LOG_FORMAT,
       '--source',
@@ -467,7 +591,9 @@ async function readRepo(repo, root, limit, allBranches, signal) {
  * @param {{ root: string, limit: number, maxDepth: number, allBranches: boolean }} request
  */
 async function collect(request) {
-  const repos = await discoverRepos(request.root, request.maxDepth)
+  const discovered = await discoverRepos(request.root, request.maxDepth)
+  const verified = await filterRepoRoots(discovered.repos)
+  const repos = verified.repos
   const details = new Array(repos.length)
   let cursor = 0
   const workers = Math.min(SCAN_CONCURRENCY, Math.max(repos.length, 1))
@@ -506,6 +632,8 @@ async function collect(request) {
     commits,
     total: commits.length,
     truncated,
+    reposTruncated: discovered.truncated,
+    reposSkipped: verified.skipped.length,
   }
 }
 
@@ -522,7 +650,7 @@ async function readIntroducedCommits(repo, hash, signal) {
       '--no-merges',
       `--pretty=format:%H%x00%h%x00%an%x00%aI%x00%cI%x00%s%x00`,
       '-n',
-      String(MERGE_COMMIT_LIMIT),
+      String(MERGE_COMMIT_LIMIT + 1),
       '--end-of-options',
       `${hash}^1..${hash}`,
     ],
@@ -543,8 +671,10 @@ async function readIntroducedCommits(repo, hash, signal) {
       subject: fields[5],
     })
   }
+  const truncated = commits.length > MERGE_COMMIT_LIMIT
   commits.sort((left, right) => commitTime(right) - commitTime(left))
-  return { commits, truncated: commits.length >= MERGE_COMMIT_LIMIT }
+  if (truncated) commits.length = MERGE_COMMIT_LIMIT
+  return { commits, truncated }
 }
 
 /**
@@ -602,7 +732,7 @@ async function handleCommit(request, ctx) {
   const hash = url.searchParams.get('hash') ?? ''
   if (repo === null) return jsonResponse(400, { error: 'invalid-repo', repo: requested ?? '' })
   if (!isInsideWorkspace(ctx, repo)) return jsonResponse(403, { error: 'outside-workspace', repo })
-  if (!isGitRepoRoot(repo)) return jsonResponse(400, { error: 'invalid-repo', repo })
+  if (!(await isGitRepoRoot(repo))) return jsonResponse(400, { error: 'invalid-repo', repo })
   if (!/^[0-9a-fA-F]{7,40}$/.test(hash)) return jsonResponse(400, { error: 'invalid-hash', hash })
 
   const cacheKey = `${repo}|${hash.toLowerCase()}`
@@ -679,6 +809,9 @@ async function handleCommit(request, ctx) {
     if (typeof file.insertions === 'number') insertions += file.insertions
     if (typeof file.deletions === 'number') deletions += file.deletions
   }
+  const fileCount = files.length
+  const filesTruncated = fileCount > MAX_FILES
+  if (filesTruncated) files.length = MAX_FILES
 
   const parents = (fields[8] ?? '').split(' ').filter((item) => item !== '')
   let merge = null
@@ -698,7 +831,8 @@ async function handleCommit(request, ctx) {
     subject,
     body,
     files,
-    stat: { files: files.length, insertions, deletions },
+    filesTruncated,
+    stat: { files: fileCount, insertions, deletions },
   }
   if (!request.signal.aborted) setBoundedCache(commitCache, cacheKey, value, COMMIT_CACHE_LIMIT)
   return jsonResponse(200, value)
@@ -715,43 +849,71 @@ async function handleFetch(request, ctx) {
   const root = resolveWorkspaceRoot(requested)
   if (root === null) return jsonResponse(400, { error: 'invalid-root', root: requested ?? '' })
   if (!isInsideWorkspace(ctx, root)) return jsonResponse(403, { error: 'outside-workspace', root })
+  // 同一工作区同时只允许一个 fetch；否则并发请求会成倍放大网络与进程开销。
+  if (fetchLocks.has(root)) return jsonResponse(409, { error: 'fetch-in-progress', root })
 
-  const repos = await discoverRepos(root, 4)
+  const control = new AbortController()
+  fetchLocks.set(root, control)
+  const deadline = setTimeout(() => control.abort(), FETCH_TOTAL_TIMEOUT_MS)
   const started = Date.now()
   const results = []
-  const queue = [...repos]
 
-  await Promise.all(
-    Array.from({ length: Math.min(FETCH_CONCURRENCY, Math.max(queue.length, 1)) }, async () => {
-      while (queue.length > 0) {
-        const repo = queue.shift()
-        const name = path.relative(root, repo) || '.'
-        const begin = Date.now()
-        const outcome = await git(['fetch', '--all', '--prune', '--quiet', '--no-recurse-submodules'], repo, {
-          timeout: FETCH_TIMEOUT_MS,
-          signal: request.signal,
-          network: true,
-        })
-        results.push({
-          name,
-          path: repo,
-          ok: outcome.ok,
-          message: outcome.ok ? null : outcome.message.slice(0, 300),
-          ms: Date.now() - begin,
-        })
-      }
-    }),
-  )
+  try {
+    const discovered = await discoverRepos(root, 4)
+    const verified = await filterRepoRoots(discovered.repos)
+    for (const repo of verified.skipped) {
+      results.push({
+        name: path.relative(root, repo) || '.',
+        path: repo,
+        ok: false,
+        message: 'not-a-repository-root',
+        ms: 0,
+      })
+    }
+    const queue = [...verified.repos]
+    const signal =
+      typeof AbortSignal.any === 'function'
+        ? AbortSignal.any([request.signal, control.signal])
+        : control.signal
 
-  results.sort((left, right) => left.name.localeCompare(right.name))
-  stateCache.clear()
-  return jsonResponse(200, {
-    root,
-    fetchedAt: new Date().toISOString(),
-    durationMs: Date.now() - started,
-    failed: results.filter((item) => !item.ok).length,
-    results,
-  })
+    await Promise.all(
+      Array.from({ length: Math.min(FETCH_CONCURRENCY, Math.max(queue.length, 1)) }, async () => {
+        for (;;) {
+          const repo = queue.shift()
+          if (repo === undefined || signal.aborted) return
+          const name = path.relative(root, repo) || '.'
+          const begin = Date.now()
+          const outcome = await git(['fetch', '--all', '--prune', '--quiet', '--no-recurse-submodules'], repo, {
+            timeout: FETCH_TIMEOUT_MS,
+            signal,
+            network: true,
+          })
+          results.push({
+            name,
+            path: repo,
+            ok: outcome.ok,
+            message: outcome.ok ? null : outcome.message.slice(0, 300),
+            ms: Date.now() - begin,
+          })
+        }
+      }),
+    )
+
+    results.sort((left, right) => left.name.localeCompare(right.name))
+    stateCache.clear()
+    return jsonResponse(200, {
+      root,
+      fetchedAt: new Date().toISOString(),
+      durationMs: Date.now() - started,
+      timedOut: control.signal.aborted && !request.signal.aborted,
+      reposTruncated: discovered.truncated,
+      failed: results.filter((item) => !item.ok).length,
+      results,
+    })
+  } finally {
+    clearTimeout(deadline)
+    if (fetchLocks.get(root) === control) fetchLocks.delete(root)
+  }
 }
 
 /**
@@ -768,7 +930,7 @@ async function handlePatch(request, ctx) {
 
   if (repo === null) return jsonResponse(400, { error: 'invalid-repo', repo: requested ?? '' })
   if (!isInsideWorkspace(ctx, repo)) return jsonResponse(403, { error: 'outside-workspace', repo })
-  if (!isGitRepoRoot(repo)) return jsonResponse(400, { error: 'invalid-repo', repo })
+  if (!(await isGitRepoRoot(repo))) return jsonResponse(400, { error: 'invalid-repo', repo })
   if (!/^[0-9a-fA-F]{7,40}$/.test(hash)) return jsonResponse(400, { error: 'invalid-hash', hash })
   if (file === '' || file.includes('\u0000')) return jsonResponse(400, { error: 'invalid-file', file })
   if (file.startsWith(':')) return jsonResponse(400, { error: 'invalid-file', file })
@@ -821,9 +983,10 @@ async function handlePatch(request, ctx) {
       emitted += 1
       continue
     }
-    if (DIFF_META_PREFIXES.some((prefix) => raw.startsWith(prefix))) continue
-    if (raw.startsWith('\\')) continue
+    // hunk 之外的行只有 diff 头部/元信息（diff --git、index、---、+++、mode 等），全部跳过。
+    // 不能在 hunk 内按前缀丢弃：以 `--- ` / `+++ ` 开头的行是内容本身。
     if (current === null || raw === '') continue
+    if (raw.startsWith('\\')) continue
 
     let type = 'context'
     let text = raw
@@ -837,6 +1000,9 @@ async function handlePatch(request, ctx) {
       deletions += 1
     } else if (raw.startsWith(' ')) {
       text = raw.slice(1)
+    } else {
+      // hunk 内出现无法识别的行：跳过，避免把它误渲染成正文。
+      continue
     }
     current.lines.push({
       type,
