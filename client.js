@@ -101,6 +101,25 @@ window.__ModuleLoader__.load({
       'detail.files': '变更文件',
       'detail.noFiles': '没有文件变更',
       'detail.expand': '点击展开提交详情',
+      'diff.missingParams': '差异页签缺少定位参数，请回到提交详情重新打开。',
+      'diff.openFailed': '打开差异页签失败：{message}',
+      'fetch.confirm': '将对 {count} 个仓库执行 git fetch（只更新远程跟踪引用，不会合并或改动工作区文件）。继续？',
+      'fetch.confirmYes': '开始拉取',
+      'fetch.confirmNo': '取消',
+      'fetch.timedOut': '拉取超时，已停止剩余仓库',
+      'state.reposTruncated': '仓库数量已达扫描上限，部分仓库未列出',
+      'state.reposSkipped': '{count} 个目录不是有效仓库根，已跳过',
+      'detail.retry': '重试',
+      'detail.filesTruncated': '文件过多，仅显示前 {count} 个',
+      'error.http': '请求失败（HTTP {status}）',
+      'error.outsideWorkspace': '该目录不在已注册的工作区内',
+      'error.invalidRoot': '工作区目录无效',
+      'error.invalidRepo': '不是有效的 git 仓库',
+      'error.invalidHash': '提交哈希无效',
+      'error.invalidFile': '文件路径无效',
+      'error.fetchInProgress': '已有拉取任务在进行，请稍后再试',
+      'error.commitNotFound': '找不到该提交',
+      'error.patchNotFound': '找不到该文件的差异',
     }
 
     /** 英文文案。 */
@@ -174,6 +193,25 @@ window.__ModuleLoader__.load({
       'detail.files': 'Changed files',
       'detail.noFiles': 'No file changed',
       'detail.expand': 'Click to expand commit detail',
+      'diff.missingParams': 'Diff tab is missing its target; reopen it from the commit detail.',
+      'diff.openFailed': 'Cannot open the diff tab: {message}',
+      'fetch.confirm': 'Run git fetch on {count} repositories? Only remote-tracking refs are updated; nothing is merged and no working-tree file is changed.',
+      'fetch.confirmYes': 'Start fetch',
+      'fetch.confirmNo': 'Cancel',
+      'fetch.timedOut': 'Fetch timed out; remaining repositories were stopped',
+      'state.reposTruncated': 'Repository scan hit its limit; some repositories are not listed',
+      'state.reposSkipped': '{count} directories are not valid repository roots and were skipped',
+      'detail.retry': 'Retry',
+      'detail.filesTruncated': 'Too many files; showing the first {count}',
+      'error.http': 'Request failed (HTTP {status})',
+      'error.outsideWorkspace': 'This directory is outside the registered workspace',
+      'error.invalidRoot': 'Invalid workspace directory',
+      'error.invalidRepo': 'Not a valid git repository',
+      'error.invalidHash': 'Invalid commit hash',
+      'error.invalidFile': 'Invalid file path',
+      'error.fetchInProgress': 'A fetch is already running; try again later',
+      'error.commitNotFound': 'Commit not found',
+      'error.patchNotFound': 'No diff found for this file',
     }
 
     /** 插件样式，随视图渲染。 */
@@ -277,6 +315,13 @@ window.__ModuleLoader__.load({
 .gm-file-del{color:var(--dsw-alias-state-error-primary)}
 .gm-status{padding:28px 20px;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:1.7}
 .gm-status-error{color:var(--dsw-alias-state-error-primary)}
+.gm-confirm{flex:none;display:flex;align-items:center;gap:10px;padding:8px 20px;border-bottom:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);font-size:12px}
+.gm-confirm-text{flex:auto;min-width:0;color:var(--dsw-alias-label-secondary);line-height:1.5}
+.gm-confirm-yes{color:var(--dsw-alias-brand-primary)}
+.gm-confirm-error{background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 10%,transparent)}
+.gm-confirm-error .gm-confirm-text{color:var(--dsw-alias-state-error-primary)}
+.gm-retry{margin-left:10px;font:inherit;font-size:11px;padding:1px 8px;border-radius:3px;border:.5px solid var(--dsw-alias-border-l1);background:0 0;color:var(--dsw-alias-brand-primary);cursor:pointer}
+.gm-retry:hover{border-color:var(--dsw-alias-brand-primary)}
 @media (max-width:900px){.gm-author{display:none}}
 @media (max-width:700px){.gm-branch{max-width:150px}.gm-refs{display:none}}
 `
@@ -304,14 +349,17 @@ window.__ModuleLoader__.load({
 `
 
     /**
-     * 把 ISO 时间转成紧凑显示。
+     * 把 ISO 时间转成浏览器本地时区的紧凑显示。
      * @param {string} iso ISO 8601 时间。
      */
     function formatTime(iso) {
-      const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(iso || '')
-      if (match === null) return iso || ''
-      const sameYear = String(new Date().getFullYear()) === match[1]
-      return sameYear ? `${match[2]}-${match[3]} ${match[4]}:${match[5]}` : `${match[1]}-${match[2]}-${match[3]}`
+      const date = new Date(iso || '')
+      if (Number.isNaN(date.getTime())) return iso || ''
+      const pad = (value) => String(value).padStart(2, '0')
+      const sameYear = date.getFullYear() === new Date().getFullYear()
+      return sameYear
+        ? `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+        : `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
     }
 
     /**
@@ -444,6 +492,100 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** 差异页签参数持久化键：DSH 只持久化页签的 contentId/title，不持久化 navigation.params。 */
+    const TAB_PARAMS_KEY = 'dsh-git-multirepo:tab-params:v1'
+    /** 最多记住多少个差异页签的定位参数。 */
+    const TAB_PARAMS_LIMIT = 100
+    /** 单个差异页签最多渲染的 diff 行数（服务端上限 5000，这里再兜一层）。 */
+    const DIFF_RENDER_LIMIT = 3000
+    /** 提交详情里最多渲染的文件条目数（服务端上限 500）。 */
+    const FILES_RENDER_LIMIT = 500
+
+    /**
+     * 记住一个差异页签的定位参数，供同源页面重载后恢复
+     * （桌面端冷启动换随机端口时 origin 变化，本地存储无法跨 origin，属已知限制）。
+     * @param {string} contentId 页签持久化 id。
+     * @param {{ repo: string, hash: string, file: string }} params 定位参数。
+     */
+    function rememberTabParams(contentId, params) {
+      if (contentId === '' || typeof localStorage === 'undefined') return
+      try {
+        const raw = localStorage.getItem(TAB_PARAMS_KEY)
+        const parsed = raw === null ? {} : JSON.parse(raw)
+        const map = typeof parsed === 'object' && parsed !== null ? parsed : {}
+        map[contentId] = params
+        const keys = Object.keys(map)
+        while (keys.length > TAB_PARAMS_LIMIT) {
+          const oldest = keys.shift()
+          if (oldest !== undefined) delete map[oldest]
+        }
+        localStorage.setItem(TAB_PARAMS_KEY, JSON.stringify(map))
+      } catch {
+        // 隐私模式或存储配额不足时放弃持久化；页签重开时仍会显示缺参提示。
+      }
+    }
+
+    /**
+     * 读取一个差异页签记住的定位参数。
+     * @param {string} contentId 页签持久化 id。
+     * @returns {{ repo: string, hash: string, file: string } | undefined} 定位参数。
+     */
+    function recallTabParams(contentId) {
+      if (contentId === '' || typeof localStorage === 'undefined') return undefined
+      try {
+        const raw = localStorage.getItem(TAB_PARAMS_KEY)
+        if (raw === null) return undefined
+        const parsed = JSON.parse(raw)
+        if (typeof parsed !== 'object' || parsed === null) return undefined
+        const params = parsed[contentId]
+        return typeof params === 'object' && params !== null ? params : undefined
+      } catch {
+        return undefined
+      }
+    }
+
+    /**
+     * 按仓库路径稳定分配配色，避免重扫/新增仓库后颜色整体位移。
+     * @param {string} value 仓库路径或名字。
+     */
+    function paletteIndex(value) {
+      let hash = 0
+      for (let index = 0; index < value.length; index += 1) {
+        hash = (hash * 31 + value.charCodeAt(index)) >>> 0
+      }
+      return hash % PALETTE.length
+    }
+
+    /** 服务端错误码到文案键的映射。 */
+    const ERROR_CODE_KEYS = {
+      'outside-workspace': 'error.outsideWorkspace',
+      'invalid-root': 'error.invalidRoot',
+      'invalid-repo': 'error.invalidRepo',
+      'invalid-hash': 'error.invalidHash',
+      'invalid-file': 'error.invalidFile',
+      'fetch-in-progress': 'error.fetchInProgress',
+      'commit-not-found': 'error.commitNotFound',
+      'patch-not-found': 'error.patchNotFound',
+    }
+
+    /**
+     * 把一个失败响应转换成可读文案：优先按服务端错误码本地化，否则回退到 HTTP 状态。
+     * @param {Response} response 失败响应。
+     * @param {(key: string) => string} t 翻译函数。
+     */
+    async function failureMessage(response, t) {
+      let code = ''
+      try {
+        const body = await response.clone().json()
+        if (typeof body?.error === 'string') code = body.error
+      } catch {
+        // 非 JSON 响应按 HTTP 状态兜底。
+      }
+      const key = ERROR_CODE_KEYS[code]
+      if (key !== undefined) return t(key)
+      return text(t, 'error.http', { status: response.status })
+    }
+
     /**
      * 计算一条提交应显示的分支标注。
      * @param {any} commit 提交记录。
@@ -497,23 +639,31 @@ window.__ModuleLoader__.load({
       /** 单个文件在一次提交中的 unified diff。 */
       return function DiffView({ useTabInfo }) {
         const { tab } = useTabInfo()
-        const params = tab.navigation?.params ?? {}
+        const contentId = typeof tab.contentId === 'string' ? tab.contentId : ''
+        // 同源页面重载后 DSH 不恢复 navigation.params，用本地记住的定位参数兜底。
+        const params = tab.navigation?.params ?? recallTabParams(contentId) ?? {}
         const repo = typeof params.repo === 'string' ? params.repo : ''
         const hash = typeof params.hash === 'string' ? params.hash : ''
         const file = typeof params.file === 'string' ? params.file : ''
         const [state, setState] = useState({ status: 'loading' })
 
         useEffect(() => {
+          if (contentId !== '' && repo !== '' && hash !== '' && file !== '') {
+            rememberTabParams(contentId, { repo, hash, file })
+          }
+        }, [contentId, repo, hash, file])
+
+        useEffect(() => {
           if (repo === '' || hash === '' || file === '') {
-            setState({ status: 'error', message: 'missing navigation params' })
+            setState({ status: 'error', message: t('diff.missingParams') })
             return undefined
           }
           const controller = new AbortController()
           setState({ status: 'loading' })
           const query = new URLSearchParams({ repo, hash, file })
           fetch(`${PATCH_URL}?${query.toString()}`, { signal: controller.signal })
-            .then((response) => {
-              if (!response.ok) throw new Error(`HTTP ${response.status}`)
+            .then(async (response) => {
+              if (!response.ok) throw new Error(await failureMessage(response, t))
               return response.json()
             })
             .then((data) => {
@@ -554,7 +704,10 @@ window.__ModuleLoader__.load({
         const data = state.data
         const rows = []
         let previousOldEnd = 0
+        let rendered = 0
+        let renderTruncated = false
         for (const hunk of data.hunks) {
+          if (renderTruncated) break
           const info = hunkInfo(hunk.header)
           if (previousOldEnd > 0 && info.oldLine > previousOldEnd) {
             rows.push(
@@ -569,6 +722,10 @@ window.__ModuleLoader__.load({
           let oldLine = info.oldLine
           let newLine = info.newLine
           for (const line of hunk.lines) {
+            if (rendered >= DIFF_RENDER_LIMIT) {
+              renderTruncated = true
+              break
+            }
             let number
             if (line.type === 'add') {
               number = newLine
@@ -590,10 +747,12 @@ window.__ModuleLoader__.load({
                 h('span', { className: 'gd-text' }, line.text),
               ),
             )
+            rendered += 1
           }
           previousOldEnd = info.oldLine + info.oldCount
         }
 
+        const truncated = data.truncated || renderTruncated
         let body
         if (data.binary) body = h('div', { className: 'gd-status' }, t('diff.binary'))
         else if (rows.length === 0) body = h('div', { className: 'gd-status' }, t('diff.empty'))
@@ -604,7 +763,7 @@ window.__ModuleLoader__.load({
           { className: 'gd-root' },
           h('style', null, DIFF_STYLE),
           head,
-          data.truncated ? h('div', { className: 'gd-status' }, t('diff.truncated')) : null,
+          truncated ? h('div', { className: 'gd-status' }, t('diff.truncated')) : null,
           body,
         )
       }
@@ -640,7 +799,32 @@ window.__ModuleLoader__.load({
         const [fetching, setFetching] = useState(false)
         const [fetchReport, setFetchReport] = useState(null)
         const [state, setState] = useState({ status: 'idle', data: null, failure: null })
+        const [confirmingFetch, setConfirmingFetch] = useState(false)
+        const [openDiffError, setOpenDiffError] = useState(null)
         const listRef = useRef(null)
+        const fetchAbortRef = useRef(null)
+        const detailAbortsRef = useRef(new Map())
+
+        /** 打开右侧栏差异页签；失败时把原因显示在视图里而不是抛出。 */
+        const openDiffSafe = useCallback(
+          (repo, hash, file) => {
+            try {
+              openDiff(repo, hash, file)
+            } catch (error) {
+              setOpenDiffError(error instanceof Error ? error.message : String(error))
+            }
+          },
+          [openDiff],
+        )
+
+        useEffect(
+          () => () => {
+            fetchAbortRef.current?.abort()
+            for (const controller of detailAbortsRef.current.values()) controller.abort()
+            detailAbortsRef.current.clear()
+          },
+          [],
+        )
 
         useEffect(() => {
           if (typeof cwd !== 'string' || cwd === '') {
@@ -661,8 +845,8 @@ window.__ModuleLoader__.load({
             all: allBranches ? '1' : '0',
           })
           fetch(`${STATE_URL}?${params.toString()}`, { signal: controller.signal })
-            .then((response) => {
-              if (!response.ok) throw new Error(`HTTP ${response.status}`)
+            .then(async (response) => {
+              if (!response.ok) throw new Error(await failureMessage(response, t))
               return response.json()
             })
             .then((value) => {
@@ -693,9 +877,7 @@ window.__ModuleLoader__.load({
 
         const colors = useMemo(() => {
           const map = new Map()
-          for (let index = 0; index < repos.length; index += 1) {
-            map.set(repos[index].name, PALETTE[index % PALETTE.length])
-          }
+          for (const repo of repos) map.set(repo.name, PALETTE[paletteIndex(repo.path ?? repo.name)])
           return map
         }, [data])
 
@@ -786,32 +968,50 @@ window.__ModuleLoader__.load({
         }, [])
 
         const loadDetail = useCallback(
-          (key, commit) => {
-            if (details[key] !== undefined || detailCache.has(key)) return
+          (key, commit, force = false) => {
+            const entry = details[key]
+            if (
+              !force &&
+              (entry?.status === 'loading' || entry?.status === 'ready' || detailCache.has(key))
+            ) {
+              return
+            }
             const repoPath = repoPaths.get(commit.repo)
-            if (repoPath === undefined) return
-            setDetails((current) => {
-              if (current[key] !== undefined) return current
-              return { ...current, [key]: { status: 'loading' } }
-            })
+            if (repoPath === undefined) {
+              setDetails((current) => ({
+                ...current,
+                [key]: { status: 'error', message: t('error.invalidRepo') },
+              }))
+              return
+            }
+            if (force) detailCache.delete(key)
+            detailAbortsRef.current.get(key)?.abort()
+            const controller = new AbortController()
+            detailAbortsRef.current.set(key, controller)
+            setDetails((current) => ({ ...current, [key]: { status: 'loading' } }))
             const params = new URLSearchParams({ repo: repoPath, hash: commit.hash })
-            fetch(`${COMMIT_URL}?${params.toString()}`)
-              .then((response) => {
-                if (!response.ok) throw new Error(`HTTP ${response.status}`)
+            fetch(`${COMMIT_URL}?${params.toString()}`, { signal: controller.signal })
+              .then(async (response) => {
+                if (!response.ok) throw new Error(await failureMessage(response, t))
                 return response.json()
               })
               .then((payload) => {
+                if (controller.signal.aborted) return
                 remember(detailCache, key, payload, DETAIL_CACHE_LIMIT)
                 setDetails((current) => ({ ...current, [key]: { status: 'ready', data: payload } }))
               })
               .catch((error) => {
+                if (controller.signal.aborted) return
                 setDetails((current) => ({
                   ...current,
                   [key]: { status: 'error', message: error instanceof Error ? error.message : String(error) },
                 }))
               })
+              .finally(() => {
+                if (detailAbortsRef.current.get(key) === controller) detailAbortsRef.current.delete(key)
+              })
           },
-          [repoPaths, details],
+          [repoPaths, details, t],
         )
 
         const toggleCommit = useCallback(
@@ -825,30 +1025,40 @@ window.__ModuleLoader__.load({
 
         const runFetch = useCallback(() => {
           if (typeof cwd !== 'string' || cwd === '') return
+          fetchAbortRef.current?.abort()
+          const controller = new AbortController()
+          fetchAbortRef.current = controller
+          setConfirmingFetch(false)
           setFetching(true)
           setFetchReport(null)
           const params = new URLSearchParams({ root: cwd })
-          fetch(`${FETCH_URL}?${params.toString()}`, { method: 'POST' })
-            .then((response) => {
-              if (!response.ok) throw new Error(`HTTP ${response.status}`)
+          fetch(`${FETCH_URL}?${params.toString()}`, { method: 'POST', signal: controller.signal })
+            .then(async (response) => {
+              if (!response.ok) throw new Error(await failureMessage(response, t))
               return response.json()
             })
             .then((report) => {
+              if (controller.signal.aborted) return
               setFetchReport({
                 status: (report.failed ?? 0) > 0 ? 'partial' : 'ok',
                 count: report.results?.length ?? 0,
                 failed: report.failed ?? 0,
+                timedOut: report.timedOut === true,
               })
               setDetails({})
               setReloadToken((value) => value + 1)
             })
             .catch((error) => {
+              if (controller.signal.aborted) return
               setFetchReport({
                 status: 'error',
                 message: error instanceof Error ? error.message : String(error),
               })
             })
-            .finally(() => setFetching(false))
+            .finally(() => {
+              if (fetchAbortRef.current === controller) fetchAbortRef.current = null
+              setFetching(false)
+            })
         }, [cwd])
 
         const toolbar = h(
@@ -893,7 +1103,10 @@ window.__ModuleLoader__.load({
               className: 'gm-tool',
               title: t('action.fetchHint'),
               disabled: loading || fetching,
-              onClick: runFetch,
+              onClick: () => {
+                if (repos.length > 0) setConfirmingFetch(true)
+                else runFetch()
+              },
             },
             h(FetchGlyph),
             fetching ? t('action.fetching') : t('action.fetch'),
@@ -958,7 +1171,19 @@ window.__ModuleLoader__.load({
             return h(
               'div',
               { className: 'gm-detail gm-detail-error', key: `${key}#d` },
-              text(t, 'detail.error', { message: entry.message }),
+              h('span', null, text(t, 'detail.error', { message: entry.message })),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'gm-retry',
+                  onClick: (event) => {
+                    event.stopPropagation()
+                    loadDetail(key, commit, true)
+                  },
+                },
+                t('detail.retry'),
+              ),
             )
           }
 
@@ -1037,32 +1262,43 @@ window.__ModuleLoader__.load({
               : h(
                   'ul',
                   { className: 'gm-detail-files' },
-                  info.files.map((file) =>
-                    h(
-                      'li',
-                      { className: 'gm-file', key: file.path },
+                  [
+                    ...info.files.slice(0, FILES_RENDER_LIMIT).map((file) =>
                       h(
-                        'span',
-                        { className: `gm-file-status gm-file-${file.status.charAt(0)}`, title: file.status },
-                        file.status.charAt(0),
-                      ),
-                      h(
-                        'button',
-                        {
-                          type: 'button',
-                          className: 'gm-file-path gm-file-open',
-                          title: t('diff.open'),
-                          onClick: (event) => {
-                            event.stopPropagation()
-                            openDiff(repoPaths.get(commit.repo) ?? '', commit.hash, file.path)
+                        'li',
+                        { className: 'gm-file', key: file.path },
+                        h(
+                          'span',
+                          { className: `gm-file-status gm-file-${file.status.charAt(0)}`, title: file.status },
+                          file.status.charAt(0),
+                        ),
+                        h(
+                          'button',
+                          {
+                            type: 'button',
+                            className: 'gm-file-path gm-file-open',
+                            title: t('diff.open'),
+                            onClick: (event) => {
+                              event.stopPropagation()
+                              openDiffSafe(repoPaths.get(commit.repo) ?? '', commit.hash, file.path)
+                            },
                           },
-                        },
-                        file.path,
+                          file.path,
+                        ),
+                        h('span', { className: 'gm-file-num' }, file.insertions === null ? 'bin' : `+${file.insertions}`),
+                        h('span', { className: 'gm-file-del' }, file.deletions === null ? '' : `−${file.deletions}`),
                       ),
-                      h('span', { className: 'gm-file-num' }, file.insertions === null ? 'bin' : `+${file.insertions}`),
-                      h('span', { className: 'gm-file-del' }, file.deletions === null ? '' : `−${file.deletions}`),
                     ),
-                  ),
+                    info.filesTruncated === true || info.files.length > FILES_RENDER_LIMIT
+                      ? h(
+                          'li',
+                          { className: 'gm-detail-empty', key: 'files-truncated' },
+                          text(t, 'detail.filesTruncated', {
+                            count: Math.min(info.files.length, FILES_RENDER_LIMIT),
+                          }),
+                        )
+                      : null,
+                  ].filter(Boolean),
                 ),
           )
         }
@@ -1235,7 +1471,7 @@ window.__ModuleLoader__.load({
             { className: 'gm-status gm-status-error', 'data-gm-state': 'error' },
             text(t, 'state.error', { message: state.failure ?? '' }),
           )
-        } else if (state.status === 'loading' && data === null) {
+        } else if ((state.status === 'loading' || state.status === 'idle') && data === null) {
           body = h('div', { className: 'gm-status', 'data-gm-state': 'loading' }, t('state.loading'))
         } else if (repos.length === 0) {
           body = h('div', { className: 'gm-status', 'data-gm-state': 'empty' }, t('state.empty'))
@@ -1256,12 +1492,51 @@ window.__ModuleLoader__.load({
           { className: 'gm-root', 'data-gm-status': state.status },
           h('style', null, STYLE),
           toolbar,
+          confirmingFetch
+            ? h(
+                'div',
+                { className: 'gm-confirm', role: 'alertdialog', 'aria-label': t('fetch.confirmYes') },
+                h('span', { className: 'gm-confirm-text' }, text(t, 'fetch.confirm', { count: repos.length })),
+                h(
+                  'button',
+                  { type: 'button', className: 'gm-tool gm-confirm-yes', onClick: runFetch },
+                  t('fetch.confirmYes'),
+                ),
+                h(
+                  'button',
+                  { type: 'button', className: 'gm-tool', onClick: () => setConfirmingFetch(false) },
+                  t('fetch.confirmNo'),
+                ),
+              )
+            : null,
+          openDiffError === null
+            ? null
+            : h(
+                'div',
+                { className: 'gm-confirm gm-confirm-error', role: 'alert' },
+                h('span', { className: 'gm-confirm-text' }, text(t, 'diff.openFailed', { message: openDiffError })),
+                h(
+                  'button',
+                  { type: 'button', className: 'gm-tool', onClick: () => setOpenDiffError(null) },
+                  t('fetch.confirmNo'),
+                ),
+              ),
           h(
             'div',
             { className: 'gm-bar' },
             h('div', { className: 'gm-meta' }, data === null ? null : h('span', null, summary)),
             query.trim() !== '' ? h('span', { className: 'gm-meta' }, text(t, 'summary.filtered', { count: items.length })) : null,
             hiddenRepos.length > 0 ? h('span', { className: 'gm-meta' }, text(t, 'summary.hidden', { count: hiddenRepos.length })) : null,
+            data?.reposTruncated === true
+              ? h('span', { className: 'gm-meta gm-meta-warn' }, t('state.reposTruncated'))
+              : null,
+            (data?.reposSkipped ?? 0) > 0
+              ? h(
+                  'span',
+                  { className: 'gm-meta gm-meta-warn' },
+                  text(t, 'state.reposSkipped', { count: data.reposSkipped }),
+                )
+              : null,
             loading && data !== null ? h('span', { className: 'gm-meta' }, t('state.loading')) : null,
             fetchReport === null
               ? null
@@ -1272,12 +1547,15 @@ window.__ModuleLoader__.load({
                       fetchReport.status === 'ok'
                         ? 'gm-meta gm-fetch-ok'
                         : 'gm-meta gm-fetch-fail',
+                    'aria-live': 'polite',
                   },
                   fetchReport.status === 'error'
                     ? text(t, 'fetch.error', { message: fetchReport.message ?? '' })
-                    : fetchReport.status === 'partial'
-                      ? text(t, 'fetch.partial', { count: fetchReport.failed })
-                      : text(t, 'fetch.ok', { count: fetchReport.count }),
+                    : fetchReport.timedOut === true
+                      ? t('fetch.timedOut')
+                      : fetchReport.status === 'partial'
+                        ? text(t, 'fetch.partial', { count: fetchReport.failed })
+                        : text(t, 'fetch.ok', { count: fetchReport.count }),
                 ),
             h(
               'select',
@@ -1314,46 +1592,61 @@ window.__ModuleLoader__.load({
     /** Client 半：注册字典、差异页签与顶部 Conversation 视图。 */
     function apply(ctx) {
       const t = ctx.locale.bind(NS)
-      ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'git-multirepo: dictionaries')
+
+      /**
+       * 注册一个客户端能力。单个注册失败只记录错误：rc.5 上任一 client entry
+       * 未激活会让整个 Web GUI 启动失败，不能因为一个可选视图/页签失败而拖垮宿主。
+       * @param {string} label 注册名，用于错误日志。
+       * @param {() => (() => void) | undefined} start 注册函数。
+       */
+      const register = (label, start) => {
+        try {
+          ctx.effect(() => {
+            try {
+              return start()
+            } catch (error) {
+              console.error(`[git-multirepo] ${label} failed`, error)
+              return undefined
+            }
+          }, label)
+        } catch (error) {
+          console.error(`[git-multirepo] ${label} failed`, error)
+        }
+      }
+
+      register('git-multirepo: dictionaries', () => ctx.locale.register(NS, { zh, en }))
 
       /** 在右侧栏打开一个文件的差异页签。 */
       const openDiff = (repo, hash, file) => {
         ctx.sidebarRight.openTab(DIFF_KIND, { params: { repo, hash, file } })
       }
 
-      ctx.effect(() => ctx.sidebarRightTabs.register(diffDefinition(t)), 'git-multirepo: diff type')
-      ctx.effect(
-        () =>
-          ctx.slots.inject('sidebar.right.pane.tab', () =>
-            ctx.slots.register(
-              { name: 'sidebar.right.pane.tab', key: DIFF_ID, locale: NS },
-              createDiffView(t),
-            ),
+      register('git-multirepo: diff type', () => ctx.sidebarRightTabs.register(diffDefinition(t)))
+      register('git-multirepo: diff body', () =>
+        ctx.slots.inject('sidebar.right.pane.tab', () =>
+          ctx.slots.register(
+            { name: 'sidebar.right.pane.tab', key: DIFF_ID, locale: NS },
+            createDiffView(t),
           ),
-        'git-multirepo: diff body',
+        ),
       )
-      ctx.effect(
-        () =>
-          ctx.slots.inject('sidebar.right.pane.tab.title', () =>
-            ctx.slots.register({ name: 'sidebar.right.pane.tab.title', key: DIFF_ID }, DiffTitle),
-          ),
-        'git-multirepo: diff title',
+      register('git-multirepo: diff title', () =>
+        ctx.slots.inject('sidebar.right.pane.tab.title', () =>
+          ctx.slots.register({ name: 'sidebar.right.pane.tab.title', key: DIFF_ID }, DiffTitle),
+        ),
       )
-
-      ctx.effect(
-        () =>
-          ctx.slots.inject('conversation.view', () =>
-            ctx.slots.register(
-              {
-                name: 'conversation.view',
-                id: VIEW_ID,
-                order: 20,
-                label: () => t('view.label'),
-              },
-              createView(t, openDiff),
-            ),
+      register('git-multirepo: view', () =>
+        ctx.slots.inject('conversation.view', () =>
+          ctx.slots.register(
+            {
+              name: 'conversation.view',
+              id: VIEW_ID,
+              order: 20,
+              label: () => t('view.label'),
+            },
+            createView(t, openDiff),
           ),
-        'git-multirepo: view',
+        ),
       )
     }
 

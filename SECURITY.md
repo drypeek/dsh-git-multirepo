@@ -37,19 +37,32 @@ What the plugin does about it:
 
 - Read-only routes (`/state`, `/commit`, `/patch`) run git with `core.fsmonitor=false`,
   `log.showSignature=false`, empty `gpg.program` and `diff.external`, `protocol.ext.allow=never`,
-  `--no-textconv`, `--no-ext-diff`, `GIT_OPTIONAL_LOCKS=0`, and a reduced environment that omits
+  `GIT_OPTIONAL_LOCKS=0`, `GIT_LITERAL_PATHSPECS=1`, and a reduced environment that omits
   credential variables.
-- The fetch route additionally disables the `ext::` transport and submodule recursion.
-- Every request is authenticated and restricted to directories inside a registered workspace, and
-  the commit/patch routes require the directory to be a repository root (they do not follow `.git`
-  discovery into a parent repository).
+- Before running `git status`, the plugin enumerates the repository's local `filter.*`,
+  `diff.*` and `diff.external` configuration and neutralises each key with `-c <key>=`.
+  `git status` converts working-tree content and would otherwise execute a repository's
+  `filter.<driver>.clean` / `.process` command. **Opening the view therefore does not run
+  repository-configured programs.**
+- `/patch` additionally runs with `--no-textconv` and `--no-ext-diff`; the other read-only
+  routes never produce patch text, so those conversion hooks cannot run there.
+- Every request is authenticated and restricted to directories inside a registered workspace.
+  Before a directory is treated as a repository, the plugin verifies that
+  `git rev-parse --show-toplevel` resolves to that directory itself, so an invalid nested
+  `.git` cannot make git fall back to a parent repository outside the workspace.
+- The fetch route disables the `ext::` transport and submodule recursion, and runs git with a
+  restricted environment: only the variables git needs for credentials and system operation
+  are passed through, so unrelated host-process secrets (for example DSH API keys) are not
+  inherited.
 
 What it cannot do:
 
-- It cannot neutralise a repository's `core.sshCommand` or `credential.helper` and still fetch from
-  private remotes with your existing credentials. **Fetch therefore runs `git fetch` inside every
-  repository it discovers in your workspace.** Only click **Fetch** in workspaces whose repositories
-  you trust, or keep untrusted repositories out of DSH workspaces.
+- It cannot neutralise a repository's `core.sshCommand` or `credential.helper` and still fetch
+  from private remotes with your existing credentials. **Fetch therefore runs `git fetch`
+  inside every repository it discovers in your workspace, and git may run programs configured
+  by those repositories** (for example `core.sshCommand`, `credential.helper`,
+  `remote.*.uploadpack`). Only click **Fetch** in workspaces whose repositories you trust, or
+  keep untrusted repositories out of DSH workspaces.
 
 ## Scope
 
