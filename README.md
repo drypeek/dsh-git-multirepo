@@ -8,6 +8,15 @@ If a workspace contains separate frontend, backend, or tooling repositories, the
 
 This is a third-party plugin for DeepSeek Harness (DSH), with no affiliation to DeepSeek.
 
+[![npm version](https://img.shields.io/npm/v/dsh-git-multirepo)](https://www.npmjs.com/package/dsh-git-multirepo)
+[![npm downloads](https://img.shields.io/npm/dm/dsh-git-multirepo)](https://www.npmjs.com/package/dsh-git-multirepo)
+[![CI](https://github.com/drypeek/dsh-git-multirepo/actions/workflows/ci.yml/badge.svg)](https://github.com/drypeek/dsh-git-multirepo/actions/workflows/ci.yml)
+[![license](https://img.shields.io/github/license/drypeek/dsh-git-multirepo)](https://github.com/drypeek/dsh-git-multirepo/blob/main/LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/drypeek/dsh-git-multirepo)](https://github.com/drypeek/dsh-git-multirepo/stargazers)
+![node](https://img.shields.io/badge/node-%3E%3D20-brightgreen)
+![dsh](https://img.shields.io/badge/dsh-0.2.1--rc.5%20--%200.2.x-blue)
+![JavaScript](https://img.shields.io/badge/language-JavaScript-yellow)
+
 ## Features
 
 - Browse the current branch or all branches. In current-branch mode, incoming remote commits have their own section.
