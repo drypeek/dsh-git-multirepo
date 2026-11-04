@@ -2,7 +2,7 @@
 
 View commits from several Git repositories together in DSH.
 
-English · [简体中文](https://github.com/drypeek/dsh-git-multirepo/blob/main/README.zh.md)
+English · [简体中文](https://github.com/drypeek/dsh-git-multirepo/blob/main/README-zh.md)
 
 If a workspace contains separate frontend, backend, or tooling repositories, the **Repositories** tab shows their commits in one timeline. Each commit is labelled with its repository.
 

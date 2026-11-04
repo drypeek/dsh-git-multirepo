@@ -1,6 +1,6 @@
 {
   "name": "dsh-git-multirepo",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "license": "MIT",
   "description": "Read every git repository in a DSH workspace as one merged commit timeline.",
