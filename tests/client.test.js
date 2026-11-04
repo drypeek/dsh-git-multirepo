@@ -427,3 +427,33 @@ test('repository status errors do not render as all clean', async () => {
   assert.doesNotMatch(textContent(renderer.tree), /summary\.clean/)
   renderer.unmount()
 })
+
+test('repositories view hides the conversation composer while mounted', async () => {
+  const requests = []
+  const client = loadClient(requestFetch(requests))
+  const renderer = new HookRenderer(client.view, null)
+  renderer.cwd = 'C:/workspace-composer'
+  renderer.props = viewProps(renderer)
+  renderer.render()
+  deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'ONE', 'f'.repeat(40)))
+  await renderer.flush()
+  const style = findOne(renderer.tree, (node) => node.type === 'style')
+  assert.ok(style, 'the view should ship its stylesheet')
+  assert.match(textContent(style), /\[data-composer-seat\]\{display:none/)
+  renderer.unmount()
+})
+
+test('truncated state is surfaced in the header', async () => {
+  const requests = []
+  const client = loadClient(requestFetch(requests))
+  const renderer = new HookRenderer(client.view, null)
+  renderer.cwd = 'C:/workspace-truncated'
+  renderer.props = viewProps(renderer)
+  renderer.render()
+  const value = stateValue(renderer.cwd, 'ONE', 'f'.repeat(40))
+  value.truncated = true
+  deferredRequest(requests, 'state', renderer.cwd).resolve(value)
+  await renderer.flush()
+  assert.match(textContent(renderer.tree), /state\.truncated/)
+  renderer.unmount()
+})

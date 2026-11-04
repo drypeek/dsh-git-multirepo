@@ -18,6 +18,7 @@ If your workspace contains several repositories side by side, checking them one 
 - **Fetch everything at once.** One button updates all repositories and tells you which ones failed. Each repository also shows how far ahead or behind it is.
 - **Filtering that stays out of the way.** Hide repositories you don't care about, restrict by date, or search commit messages, authors and hashes.
 - **Stays put while you scroll.** The toolbar is pinned, with one-click jumps to the top and to your current position.
+- **A full-height view.** While the **Repositories** tab is open, the chat input is hidden so the timeline gets the whole window; switch to **Chat** to type.
 
 ## Install
 
@@ -25,8 +26,8 @@ Requires DSH 0.2.1-rc.5 through 0.2.x (the diff view uses the right-sidebar tab 
 
 Install this directory as a plugin bundle:
 
-1. In DSH, open **Settings → Plugins** and install a bundle from a local folder, choosing this checkout. (An agent session can use the `plugin_manager` tool instead: `install_bundle` with the absolute path of this directory.)
-2. Enable the bundle. From the CLI, `dsh plugin --profile <profile> add link:/path/to/dsh-git-multirepo` installs the package; enable the bundle afterwards.
+1. In DSH, open **Plugins** in the sidebar and choose **Add plugin → Install a third-party plugin**, then pick this checkout (package name, Git URL, or local directory).
+2. Installation enables the bundle by default. If it is switched off, turn it on in the same **Plugins** page. The CLI equivalent is `dsh plugin --profile <profile> add link:/path/to/dsh-git-multirepo`.
 
 Then refresh the Web GUI — a **Repositories** tab appears next to *Chat* and *Trajectory*.
 
@@ -42,7 +43,7 @@ Then refresh the Web GUI — a **Repositories** tab appears next to *Chat* and *
 ## Good to know
 
 - **You need to fetch to see new work.** `git log` only reads what is already on disk. Commits pushed by others appear after a fetch — the plugin never pulls or merges into your branch by itself.
-- **Fetch asks first.** It runs `git fetch` in every repository it found, so the view asks for confirmation before starting.
+- **Fetch asks first.** It runs `git fetch` in every repository it found, so the view asks for confirmation before starting when repositories are known.
 - **Seeing is all it does.** Apart from Fetch, the plugin only reads. It never commits, pushes, merges or changes your working tree.
 - **The list is a sample.** Each repository contributes its most recent commits (40 by default), so very old history is not shown.
 - **Large results are bounded.** Long subjects and large histories/diffs are limited. A repository that exceeds Git output limits reports an error. Dirty state includes untracked files; submodules are inspected as separate repositories.
@@ -53,7 +54,7 @@ Then refresh the Web GUI — a **Repositories** tab appears next to *Chat* and *
 ## Privacy and safety
 
 - **The plugin itself never reads or stores your credentials.** Git runs as a child process with your existing credential helper, SSH configuration and remotes — exactly as it would in your terminal. Read-only requests use a minimal environment that does not hand credential variables to git; Fetch passes only the variables git needs for credentials, not unrelated host-process secrets.
-- **Read-only Git is hardened.** Filter keys are read from all effective configuration scopes without reading their values into arguments. Enumeration failure stops the repository status read. Pagers, hooks, external diff/text conversion and Git transports are disabled for reads.
+- **Read-only Git is hardened.** Repository-local filter and diff drivers are cleared before Git can run them; trusted system/global filters (for example git-lfs) stay active, so dirty state stays accurate. The Git executable is resolved once from absolute PATH entries — a repository cannot supply its own `git` program. Enumeration failure stops the repository status read. Pagers, hooks, external diff/text conversion and Git transports are disabled for reads.
 - **Only Fetch enables Git network transports.** That is `git fetch` against the remotes you configured; other client requests go to DSH's own same-origin API. Filesystem access still follows your OS permissions. No telemetry or analytics.
 - **Requests are authenticated by DSH** and restricted to directories inside registered workspaces.
 - **Apart from Fetch, nothing in your working tree changes** — the plugin never commits, pushes or merges. Fetch updates remote-tracking refs, `FETCH_HEAD` and objects only; `git status` runs with optional lock writes disabled, so it normally leaves `.git/index` untouched.
