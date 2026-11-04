@@ -110,6 +110,8 @@ window.__ModuleLoader__.load({
       'fetch.timedOut': '拉取超时，已停止剩余仓库',
       'state.reposTruncated': '仓库数量已达扫描上限，部分仓库未列出',
       'state.reposSkipped': '{count} 个目录不是有效仓库根，已跳过',
+      'state.truncated': '结果已截断，仅显示部分提交',
+      'error.busy': '请求过于频繁，请稍后再试',
       'detail.retry': '重试',
       'detail.filesTruncated': '文件列表过大，仅显示前 {count} 个',
       'error.http': '请求失败（HTTP {status}）',
@@ -211,6 +213,8 @@ window.__ModuleLoader__.load({
       'fetch.timedOut': 'Fetch timed out; remaining repositories were stopped',
       'state.reposTruncated': 'Repository scan hit its limit; some repositories are not listed',
       'state.reposSkipped': '{count} directories are not valid repository roots and were skipped',
+      'state.truncated': 'Results were truncated; only part of the history is shown',
+      'error.busy': 'Too many requests at once; try again in a moment',
       'detail.retry': 'Retry',
       'detail.filesTruncated': 'File list limited; showing the first {count}',
       'error.http': 'Request failed (HTTP {status})',
@@ -341,6 +345,14 @@ window.__ModuleLoader__.load({
 .gm-confirm-error .gm-confirm-text{color:var(--dsw-alias-state-error-primary)}
 .gm-retry{margin-left:10px;font:inherit;font-size:11px;padding:1px 8px;border-radius:3px;border:.5px solid var(--dsw-alias-border-l1);background:0 0;color:var(--dsw-alias-brand-primary);cursor:pointer}
 .gm-retry:hover{border-color:var(--dsw-alias-brand-primary)}
+/* The Repositories tab is a full-surface inspection view: while it is mounted the
+   conversation composer is hidden so the timeline can use the whole height. The
+   style tag lives inside this view, so it disappears when the user switches back
+   to Chat or Trajectory. :has() keeps the rules scoped to the conversation that
+   actually contains this view, so a second pane is never affected. */
+[data-conversation-scroll]:has(.gm-root)>*:first-child,
+[data-conversation-scroll]:has(.gm-root)>*:first-child>*:first-child{flex:1 1 auto;min-height:0;display:flex;flex-direction:column}
+[data-conversation-scroll]:has(.gm-root) [data-composer-seat]{display:none!important}
 @media (max-width:900px){.gm-author{display:none}}
 @media (max-width:700px){.gm-branch{max-width:150px}.gm-refs{display:none}}
 `
@@ -627,6 +639,7 @@ window.__ModuleLoader__.load({
       'unsafe-config': 'error.unsafeConfig',
       'offline-object-missing': 'error.offlineObjectMissing',
       'resource-limit': 'error.resourceLimit',
+      busy: 'error.busy',
       'unsupported-git-version': 'error.unsupportedGitVersion',
       'request-cancelled': 'error.requestCancelled',
       'request-failed': 'error.requestFailed',
@@ -960,7 +973,9 @@ window.__ModuleLoader__.load({
         }, [cwd, allBranches, reloadToken])
 
         const cacheKey = viewKey
-        const data = state.key === cacheKey ? state.data ?? stateCache.get(cacheKey) ?? null : stateCache.get(cacheKey) ?? null
+        const data = state.status === 'error'
+          ? null
+          : state.key === cacheKey ? state.data ?? stateCache.get(cacheKey) ?? null : stateCache.get(cacheKey) ?? null
         const repos = data?.repos ?? []
 
         const repoInfo = useMemo(() => {
@@ -1093,6 +1108,12 @@ window.__ModuleLoader__.load({
               return
             }
             if (force) detailCache.delete(key)
+            // Only one commit is expanded at a time, so a detail request for a
+            // different commit is stale: abort it instead of letting concurrent
+            // requests pile up against the host's shared request budget.
+            for (const [otherKey, otherController] of detailAbortsRef.current) {
+              if (otherKey !== key) otherController.abort()
+            }
             detailAbortsRef.current.get(key)?.abort()
             const controller = new AbortController()
             detailAbortsRef.current.set(key, controller)
@@ -1670,6 +1691,9 @@ window.__ModuleLoader__.load({
                   { className: 'gm-meta gm-meta-warn' },
                   text(t, 'state.reposSkipped', { count: data.reposSkipped }),
                 )
+              : null,
+            data?.truncated === true
+              ? h('span', { className: 'gm-meta gm-meta-warn' }, t('state.truncated'))
               : null,
             loading && data !== null ? h('span', { className: 'gm-meta' }, t('state.loading')) : null,
             fetchReport === null

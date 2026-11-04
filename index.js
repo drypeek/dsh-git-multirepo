@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process'
-import { existsSync, realpathSync, statSync, readFileSync } from 'node:fs'
+import { accessSync, constants as fsConstants, existsSync, realpathSync, statSync, readFileSync } from 'node:fs'
 import { opendir } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 /** 工作区状态路由，注册在 Connection 的 exact fetch registry。 */
@@ -247,11 +248,9 @@ const FETCH_ENV_KEYS = [
   'GIT_ASKPASS',
   'GIT_SSH',
   'GIT_SSH_COMMAND',
-  'GIT_CONFIG_COUNT',
   'GIT_CONFIG_GLOBAL',
   'GIT_CONFIG_SYSTEM',
   'GIT_CONFIG_NOSYSTEM',
-  'GIT_CONFIG_PARAMETERS',
   'GCM_INTERACTIVE',
   'WSLENV',
   'DISPLAY',
@@ -259,22 +258,44 @@ const FETCH_ENV_KEYS = [
   'USERDOMAIN',
   'PROGRAMDATA',
 ]
-/** `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` 允许调用方把配置注入子进程。 */
-const FETCH_ENV_DYNAMIC = /^GIT_CONFIG_(?:KEY|VALUE)_\d+$/
-/**
- * fetch 命令的环境变量：显式白名单 + 动态注入的 git 配置变量。
- */
+/** Fetch never inherits config-injection variables from the host environment. */
 function fetchEnv() {
   const env = {}
   for (const key of FETCH_ENV_KEYS) {
     const value = process.env[key]
     if (value !== undefined) env[key] = value
   }
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined && FETCH_ENV_DYNAMIC.test(key)) env[key] = value
-  }
   env.GIT_TERMINAL_PROMPT = '0'
   return env
+}
+
+/**
+ * Resolve the git executable once, from absolute PATH entries only.
+ * Windows searches the child's working directory before PATH, so a repository
+ * that contains `git.exe` would otherwise be executed by every read-only scan;
+ * the executable must therefore always be an absolute path resolved here.
+ * @returns {string | null} Absolute path to git, or null when PATH has none.
+ */
+let gitExecutable
+function resolveGitExecutable() {
+  if (gitExecutable !== undefined) return gitExecutable
+  gitExecutable = null
+  const names = process.platform === 'win32' ? ['git.exe'] : ['git']
+  for (const raw of (process.env.PATH ?? '').split(path.delimiter)) {
+    const directory = raw.trim().replace(/^"(.*)"$/, '$1')
+    if (directory === '' || !path.isAbsolute(directory)) continue
+    for (const name of names) {
+      const candidate = path.join(directory, name)
+      try {
+        accessSync(candidate, fsConstants.X_OK)
+        gitExecutable = candidate
+        return gitExecutable
+      } catch {
+        // Try the next PATH entry.
+      }
+    }
+  }
+  return gitExecutable
 }
 
 /**
@@ -284,6 +305,10 @@ function fetchEnv() {
  * @param {{ timeout?: number, signal?: AbortSignal, network?: boolean, config?: string[][], maxBuffer?: number, ctx?: any }} [options]
  */
 function runGit(args, cwd, options = {}) {
+  const executable = resolveGitExecutable()
+  if (executable === null) {
+    return Promise.resolve({ ok: false, code: 'git-not-found', message: 'Git executable not found on PATH' })
+  }
   const network = options.network === true
   const env = network ? fetchEnv() : readEnv()
   // Separate keys and values: a legal subsection may contain '=' or spaces.
@@ -297,7 +322,7 @@ function runGit(args, cwd, options = {}) {
   }
   return new Promise((resolve) => {
     execFile(
-      'git',
+      executable,
       ['--no-pager', ...(network ? FETCH_CONFIG_OVERRIDES : READ_CONFIG_OVERRIDES), ...args],
       {
         cwd,
@@ -320,7 +345,8 @@ let gitSupport
 function supportsGit() {
   // Git <=2.35.1 treats fsmonitor=false as a hook named "false". Older Git
   // also lacks GIT_CONFIG_COUNT. Refuse versions without both safety controls.
-  gitSupport ??= runGit(['--version']).then((result) => {
+  // The probe runs from the temp directory: no repository controls its cwd.
+  gitSupport ??= runGit(['--version'], tmpdir()).then((result) => {
     const version = result.ok && /git version (\d+)\.(\d+)/.exec(result.stdout)
     return version && (Number(version[1]) > 2 || Number(version[1]) === 2 && Number(version[2]) >= 36)
   })
@@ -337,27 +363,34 @@ async function git(args, cwd, options = {}) {
 }
 
 /**
- * 枚举所有生效作用域内可能执行外部程序的配置键，以独立键值覆盖。
- * git status 在需要把工作区内容转换回 git 对象时会执行 filter driver
- * （`.gitattributes` 选中的 `filter.<driver>.clean` / `.process`），因此只读
- * 扫描也必须先中和这些键；键名因仓库而异，只能在每个仓库上枚举。
+ * 只中和仓库自带（local/worktree）的 filter/diff 执行面。
+ * git status 在把工作区内容转换回 git 对象时会执行 filter driver
+ * （`.gitattributes` 选中的 `filter.<driver>.clean` / `.process`）。
+ * 仓库 local/worktree 配置属于不可信输入；system/global 配置属于用户自己的
+ * 受信配置（例如 git-lfs），必须保留，否则 LFS 仓库会被误判为 dirty。
  * 这里只读 `git config`，不会执行任何配置里的程序。
  * @param {string} repo 仓库目录。
  * @returns {Promise<{ok: boolean, config?: string[][], message?: string}>} 配置覆盖或失败原因。
  */
+const UNSAFE_CONFIG_KEY = /^(filter\..*\.(clean|smudge|process|required)|diff\..*\.(command|textconv)|diff\.external)$/
 async function readOnlyConfigNeutralisers(repo, signal, ctx) {
-  const pattern = '^(filter\\..*\\.(clean|smudge|process|required)|diff\\..*\\.(command|textconv)|diff\\.external)$'
-  // Default scope includes system/global/local/worktree and conditional includes.
-  // Only names are emitted: multiline and huge values cannot become arguments.
-  const result = await git(['config', '--null', '--name-only', '--includes', '--get-regexp', pattern], repo, {
-    signal, ctx, timeout: 5000, maxBuffer: 128 * 1024,
+  // --list exits 0 even with no matches, so an empty result cannot be confused
+  // with a failure; the scope column keeps trusted user configuration out.
+  const result = await git(['config', '--list', '--null', '--show-scope', '--name-only', '--includes'], repo, {
+    signal, ctx, timeout: 5000, maxBuffer: 256 * 1024,
   })
-  if (!result.ok && result.code !== 1) return { ok: false, message: 'unsafe-config: unable to enumerate Git configuration' }
-  const keys = result.ok ? [...new Set(result.stdout.split('\0').filter(Boolean))] : []
-  if (keys.length > 512 || keys.some((key) => !/^(filter\..*\.(clean|smudge|process|required)|diff\..*\.(command|textconv)|diff\.external)$/.test(key))) {
-    return { ok: false, message: 'unsafe-config: unsupported Git configuration keys' }
+  if (!result.ok) return { ok: false, message: 'unsafe-config: unable to enumerate Git configuration' }
+  const tokens = result.stdout.split('\0')
+  const config = []
+  for (let index = 0; index + 1 < tokens.length; index += 2) {
+    const scope = tokens[index]
+    const key = tokens[index + 1]
+    if (scope !== 'local' && scope !== 'worktree') continue
+    if (!UNSAFE_CONFIG_KEY.test(key)) continue
+    config.push([key, key.endsWith('.required') ? 'false' : ''])
+    if (config.length > 512) return { ok: false, message: 'unsafe-config: unsupported Git configuration keys' }
   }
-  return { ok: true, config: keys.map((key) => [key, key.endsWith('.required') ? 'false' : '']) }
+  return { ok: true, config }
 }
 
 /**
@@ -808,7 +841,7 @@ function readFailure(result, fallback) {
 let activeRequests = 0
 /** Shared work budget, including traversal, metadata validation and subprocesses. */
 async function runRequest(request, ctx, handler) {
-  if (activeRequests >= 4) return jsonResponse(429, { error: 'resource-limit' })
+  if (activeRequests >= 4) return jsonResponse(429, { error: 'busy' })
   activeRequests += 1
   const control = new AbortController()
   const abort = () => control.abort()

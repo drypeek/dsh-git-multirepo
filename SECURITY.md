@@ -40,11 +40,17 @@ What the plugin does about it:
   `GIT_OPTIONAL_LOCKS=0`, `GIT_LITERAL_PATHSPECS=1`, disabled hooks/pagers and a reduced
   environment that omits credential variables. Git 2.36+ is required and checked at runtime:
   older versions may treat the boolean `core.fsmonitor=false` as an executable hook name.
-- Before `git status`, the plugin enumerates only NUL-delimited configuration key names from
-  all effective scopes, including `config.worktree` and includes. Filter commands are cleared
+- The `git` executable is resolved once from absolute `PATH` entries and always run by
+  absolute path. Windows would otherwise search the child working directory first, letting a
+  repository that contains a `git.exe` run code during a read-only scan. The version probe
+  runs from the temporary directory, never from a repository.
+- Before `git status`, the plugin enumerates NUL-delimited configuration key names from the
+  repository-local and worktree scopes, including local includes. Filter commands are cleared
   and `filter.*.required` is set false through separate `GIT_CONFIG_KEY_n` / `VALUE_n` pairs.
-  Values containing newlines or keys containing `=` cannot become extra command options.
-  Enumeration errors and oversized inventories stop status rather than proceeding unprotected.
+  System and global configuration are treated as trusted user configuration and stay active
+  (for example git-lfs), which keeps dirty state accurate. Values containing newlines or keys
+  containing `=` cannot become extra command options. Enumeration errors and oversized
+  inventories stop status rather than proceeding unprotected.
 - Status disables recursive submodule inspection. Discovered submodules are checked separately
   with their own configuration policy; untracked files are included in dirty state.
 - Every read-only `show`/`log` disables text conversion and external diff. Read subprocesses set
@@ -67,7 +73,8 @@ What the plugin does about it:
 - The fetch route disables the `ext::` transport and submodule recursion, and runs git with a
   restricted environment: only the variables git needs for credentials and system operation
   are passed through, so unrelated host-process secrets (for example DSH API keys) are not
-  inherited.
+  inherited. Configuration-injection variables (`GIT_CONFIG_COUNT`, `GIT_CONFIG_PARAMETERS`,
+  `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n`) are not inherited either.
 
 What it cannot do:
 

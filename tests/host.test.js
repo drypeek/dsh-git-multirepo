@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test, after } from 'node:test'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, unlinkSync, rmSync, chmodSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, unlinkSync, rmSync, chmodSync, copyFileSync } from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import vm from 'node:vm'
@@ -232,8 +232,11 @@ test('old Git is rejected before a repository command can interpret fsmonitor=fa
         assert.equal(args.at(-1), '--version', 'version gate must not run any repository command')
         callback(null, `git version ${version}\n`, '')
       },
+      accessSync: () => {},
+      fsConstants: { X_OK: 1 },
+      tmpdir: () => '.',
       existsSync: () => false,
-      path, process: { env: {}, platform: process.platform },
+      path, process: { env: { PATH: process.platform === 'win32' ? 'C:\\fake-git' : '/fake-git' }, platform: process.platform },
       Request, Response, URL, AbortController, Buffer, setTimeout, clearTimeout,
     }
     vm.runInNewContext(source + '\nglobalThis.pluginApply = apply', sandbox)
@@ -278,4 +281,51 @@ test('large identity fields are bounded and file paths are omitted whole rather 
   assert.equal(result.data.files.length, 0, 'do not reinterpret an oversized path as another path')
   assert.equal(result.data.stat.files, 1)
   assert.ok(Buffer.byteLength(JSON.stringify(result.data)) <= 512 * 1024)
+})
+
+test('repository-local git executable is never used', async () => {
+  const repo = fixture()
+  const fake = path.join(repo, process.platform === 'win32' ? 'git.exe' : 'git')
+  if (process.platform === 'win32') copyFileSync(process.execPath, fake)
+  else {
+    writeFileSync(fake, '#!/bin/sh\nexit 42\n')
+    chmodSync(fake, 0o755)
+  }
+  const result = await host([repo])('state', { root: repo })
+  assert.equal(result.status, 200)
+  assert.equal(result.data.repos[0].error, null)
+  assert.equal(result.data.commits.length, 1)
+})
+
+test('filters pulled in through a local include are neutralised', async () => {
+  const repo = fixture()
+  const { marker, command } = trap(repo)
+  const includeFile = path.join(repo, 'included.conf')
+  writeFileSync(includeFile, `[filter "trap"]\n\tclean = ${command}\n\trequired = true\n`)
+  g(repo, ['config', '--local', 'include.path', includeFile.replaceAll('\\', '/')])
+  writeFileSync(path.join(repo, '.gitattributes'), 'file.txt filter=trap\n')
+  writeFileSync(path.join(repo, 'file.txt'), 'changed\n')
+  const result = await host([repo])('state', { root: repo })
+  assert.equal(result.status, 200)
+  assert.equal(result.data.repos[0].dirty, true)
+  assert.equal(existsSync(marker), false)
+})
+
+test('trusted global filters stay active for accurate dirty state', async () => {
+  const repo = fixture()
+  const globalConfig = path.join(profile, '.gitconfig')
+  const filterScript = path.join(profile, 'filter.cjs')
+  writeFileSync(filterScript, 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>process.stdout.write(d.replace("REAL","POINTER")))\n')
+  const filterCommand = `${process.execPath.replaceAll('\\', '/')} ${filterScript.replaceAll('\\', '/')}`
+  writeFileSync(globalConfig, `[filter "globalF"]\n\tclean = ${filterCommand}\n\trequired = true\n`)
+  writeFileSync(path.join(repo, '.gitattributes'), 'file.txt filter=globalF\n')
+  writeFileSync(path.join(repo, 'file.txt'), 'REAL\n')
+  const globalEnv = { ...gitEnv, GIT_CONFIG_GLOBAL: globalConfig }
+  execFileSync('git', ['-c', 'core.hooksPath=', 'add', '.gitattributes', 'file.txt'], { cwd: repo, env: globalEnv, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] })
+  execFileSync('git', ['-c', 'core.hooksPath=', 'commit', '-qm', 'filtered'], { cwd: repo, env: globalEnv, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] })
+  const result = await host([repo])('state', { root: repo })
+  assert.equal(result.status, 200)
+  assert.equal(result.data.repos[0].error, null)
+  assert.equal(result.data.repos[0].dirty, false, 'a clean repository using a trusted global filter stays clean')
+  unlinkSync(globalConfig)
 })
