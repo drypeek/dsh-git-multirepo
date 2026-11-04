@@ -8,6 +8,15 @@
 
 这是 DeepSeek Harness（DSH）的第三方插件，与 DeepSeek 无隶属关系。
 
+[![npm version](https://img.shields.io/npm/v/dsh-git-multirepo)](https://www.npmjs.com/package/dsh-git-multirepo)
+[![npm downloads](https://img.shields.io/npm/dm/dsh-git-multirepo)](https://www.npmjs.com/package/dsh-git-multirepo)
+[![CI](https://github.com/drypeek/dsh-git-multirepo/actions/workflows/ci.yml/badge.svg)](https://github.com/drypeek/dsh-git-multirepo/actions/workflows/ci.yml)
+[![license](https://img.shields.io/github/license/drypeek/dsh-git-multirepo)](https://github.com/drypeek/dsh-git-multirepo/blob/main/LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/drypeek/dsh-git-multirepo)](https://github.com/drypeek/dsh-git-multirepo/stargazers)
+![node](https://img.shields.io/badge/node-%3E%3D20-brightgreen)
+![dsh](https://img.shields.io/badge/dsh-0.2.1--rc.5%20--%200.2.x-blue)
+![JavaScript](https://img.shields.io/badge/language-JavaScript-yellow)
+
 ## 功能
 
 - 查看当前分支或所有分支的提交。当前分支模式下，尚未合并的远程提交会单独分组。
