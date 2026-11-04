@@ -21,7 +21,7 @@ If your workspace contains several repositories side by side, checking them one 
 
 ## Install
 
-Requires DSH 0.2.1-rc.5 or newer (the diff view uses the right-sidebar tab services) and git 2.24 or newer (`--end-of-options`).
+Requires DSH 0.2.1-rc.5 through 0.2.x (the diff view uses the right-sidebar tab services), Node.js 20+, and Git 2.36+ (safe configuration overrides and fsmonitor disabling). SHA-1 and SHA-256 repositories are supported.
 
 Install this directory as a plugin bundle:
 
@@ -45,16 +45,24 @@ Then refresh the Web GUI — a **Repositories** tab appears next to *Chat* and *
 - **Fetch asks first.** It runs `git fetch` in every repository it found, so the view asks for confirmation before starting.
 - **Seeing is all it does.** Apart from Fetch, the plugin only reads. It never commits, pushes, merges or changes your working tree.
 - **The list is a sample.** Each repository contributes its most recent commits (40 by default), so very old history is not shown.
+- **Large results are bounded.** Long subjects and large histories/diffs are limited. A repository that exceeds Git output limits reports an error. Dirty state includes untracked files; submodules are inspected as separate repositories.
+- **Linked worktrees need registered storage.** Register the main repository as a DSH workspace too if it is outside the worktree's workspace. Git metadata/object directories must be inside registered workspaces; repositories using object alternates are skipped.
+- **Missing objects stay offline.** Reading a partial clone never fetches missing objects automatically. Use Fetch first; if your remote does not supply the requested objects, retrieve them in your terminal before reopening the diff.
 - **It looks at the current session's directory.** Switch sessions (or workspaces) to look at a different set of repositories.
 
 ## Privacy and safety
 
 - **The plugin itself never reads or stores your credentials.** Git runs as a child process with your existing credential helper, SSH configuration and remotes — exactly as it would in your terminal. Read-only requests use a minimal environment that does not hand credential variables to git; Fetch passes only the variables git needs for credentials, not unrelated host-process secrets.
-- **Opening the view does not run repository programs.** Read-only routes neutralise a repository's filter/diff drivers before Git can execute them; only Fetch may run programs configured by a repository.
-- **Only Fetch makes network requests.** That is `git fetch` against the remotes you configured; every other request goes to DSH's own same-origin API. No telemetry, no analytics, no third-party requests.
+- **Read-only Git is hardened.** Filter keys are read from all effective configuration scopes without reading their values into arguments. Enumeration failure stops the repository status read. Pagers, hooks, external diff/text conversion and Git transports are disabled for reads.
+- **Only Fetch enables Git network transports.** That is `git fetch` against the remotes you configured; other client requests go to DSH's own same-origin API. Filesystem access still follows your OS permissions. No telemetry or analytics.
 - **Requests are authenticated by DSH** and restricted to directories inside registered workspaces.
 - **Apart from Fetch, nothing in your working tree changes** — the plugin never commits, pushes or merges. Fetch updates remote-tracking refs, `FETCH_HEAD` and objects only; `git status` runs with optional lock writes disabled, so it normally leaves `.git/index` untouched.
 - **Git can run programs configured by a repository.** That is standard git behaviour (`core.sshCommand`, `credential.helper`, `remote.*.uploadpack`, `gpg.program`, `diff` drivers). Fetch runs in every repository it finds, so keep untrusted repositories out of your DSH workspaces. See [SECURITY.md](SECURITY.md) for the threat model and the hardening applied here.
+
+## Development
+
+Run `npm run check` and `npm test` with Node.js 20+ and Git 2.36+. Tests use disposable
+repositories and local marker programs; no external remote is contacted.
 
 ## License
 

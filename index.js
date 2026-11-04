@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
-import { existsSync, realpathSync, statSync } from 'node:fs'
-import { readdir } from 'node:fs/promises'
+import { existsSync, realpathSync, statSync, readFileSync } from 'node:fs'
+import { opendir } from 'node:fs/promises'
 import path from 'node:path'
 
 /** 工作区状态路由，注册在 Connection 的 exact fetch registry。 */
@@ -17,7 +17,17 @@ const ROUTE_PATCH = '/api/git-multirepo/patch'
  */
 const FIELD_SEP = '\u0000'
 /** 单条 git 命令的最大输出缓冲。 */
-const MAX_BUFFER = 16 * 1024 * 1024
+const MAX_BUFFER = 2 * 1024 * 1024
+const STATE_BYTE_LIMIT = 8 * 1024 * 1024
+const STATE_CACHE_BYTE_LIMIT = 16 * 1024 * 1024
+const COMMIT_CACHE_BYTE_LIMIT = 8 * 1024 * 1024
+const DETAIL_BYTE_LIMIT = 512 * 1024
+const FILE_LIST_BYTE_LIMIT = 128 * 1024
+const FIELD_LIMIT = 4000
+const HASH = /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/
+const REQUEST_HASH = /^[0-9a-fA-F]{7,64}$/
+const MAX_ENTRIES = 50000
+const REQUEST_TIMEOUT_MS = 120000
 /** 单次扫描最多发现的仓库数，避免超大工作区拖垮请求。 */
 const MAX_REPOS = 100
 /** 单次扫描最多访问的目录数；超过后停止遍历，避免巨型目录树拖垮请求。 */
@@ -43,7 +53,7 @@ const SKIP_DIRS = new Set([
  * 读取类 git 命令的安全覆盖项：压住仓库本地 config 中可能执行外部程序的键。
  * 这是本插件面对"工作区内存在不受信任仓库"的主要防线之一。
  * filter/diff driver 的键名因仓库而异，无法写死：readOnlyConfigNeutralisers()
- * 会在每个仓库上枚举并追加 `-c <key>=`，见该函数。
+ * 会在每个仓库上枚举键名并通过独立环境键值覆盖，见该函数。
  */
 const READ_CONFIG_OVERRIDES = [
   '-c',
@@ -58,6 +68,16 @@ const READ_CONFIG_OVERRIDES = [
   'diff.external=',
   '-c',
   'protocol.ext.allow=never',
+  '-c',
+  'protocol.allow=never',
+  '-c',
+  'core.sshCommand=',
+  '-c',
+  'core.gitProxy=',
+  '-c',
+  'credential.helper=',
+  '-c',
+  `core.hooksPath=${process.platform === 'win32' ? 'NUL' : '/dev/null'}`,
 ]
 /** fetch 的安全覆盖项：保留凭据助手与 SSH 配置（拉取需要），只禁用 ext:: 传输。 */
 const FETCH_CONFIG_OVERRIDES = ['-c', 'core.fsmonitor=false', '-c', 'protocol.ext.allow=never']
@@ -120,11 +140,18 @@ function pruneCache(cache, ttl) {
  * @param {unknown} value 值。
  * @param {number} limit 条目上限。
  */
-function setBoundedCache(cache, key, value, limit) {
-  cache.set(key, { at: Date.now(), value })
-  while (cache.size > limit) {
+function setBoundedCache(cache, key, value, limit, byteLimit = Infinity) {
+  const serialized = Number.isFinite(byteLimit) ? JSON.stringify(value) : null
+  const bytes = serialized === null ? 0 : Buffer.byteLength(serialized)
+  if (bytes > byteLimit) return
+  cache.delete(key)
+  // Detach substrings from potentially much larger Git output buffers.
+  cache.set(key, { at: Date.now(), value: serialized === null ? value : JSON.parse(serialized), bytes })
+  let totalBytes = [...cache.values()].reduce((total, entry) => total + (entry.bytes ?? 0), 0)
+  while (cache.size > limit || totalBytes > byteLimit) {
     const oldest = cache.keys().next().value
     if (oldest === undefined) break
+    totalBytes -= cache.get(oldest).bytes ?? 0
     cache.delete(oldest)
   }
 }
@@ -198,7 +225,10 @@ function readEnv() {
   }
   env.GIT_TERMINAL_PROMPT = '0'
   env.GIT_OPTIONAL_LOCKS = '0'
-  env.GIT_ALLOW_PROTOCOL = 'file:git:ssh:http:https'
+  // Empty allowlist denies every transport, including lazy promisor fetches.
+  env.GIT_ALLOW_PROTOCOL = ''
+  env.GIT_NO_LAZY_FETCH = '1'
+  env.LC_ALL = 'C'
   // 关闭 pathspec magic（`:()`、`*`、`!` 等），file 参数只按字面路径匹配。
   env.GIT_LITERAL_PATHSPECS = '1'
   return env
@@ -251,72 +281,83 @@ function fetchEnv() {
  * 执行一条 git 命令，失败不抛出。
  * @param {string[]} args 参数数组，不经过 shell。
  * @param {string} cwd 仓库目录。
- * @param {{ timeout?: number, signal?: AbortSignal, network?: boolean, overrides?: string[] }} [options]
- *   超时、取消、是否联网，以及追加在固定覆盖项之后的额外 `-c` 覆盖项。
+ * @param {{ timeout?: number, signal?: AbortSignal, network?: boolean, config?: string[][], maxBuffer?: number, ctx?: any }} [options]
  */
-function git(args, cwd, options = {}) {
+function runGit(args, cwd, options = {}) {
   const network = options.network === true
-  const overrides = options.overrides ?? []
+  const env = network ? fetchEnv() : readEnv()
+  // Separate keys and values: a legal subsection may contain '=' or spaces.
+  if (!network) {
+    const config = options.config ?? []
+    env.GIT_CONFIG_COUNT = String(config.length)
+    config.forEach(([key, value], index) => {
+      env[`GIT_CONFIG_KEY_${index}`] = key
+      env[`GIT_CONFIG_VALUE_${index}`] = value
+    })
+  }
   return new Promise((resolve) => {
     execFile(
       'git',
-      [...(network ? FETCH_CONFIG_OVERRIDES : READ_CONFIG_OVERRIDES), ...overrides, ...args],
+      ['--no-pager', ...(network ? FETCH_CONFIG_OVERRIDES : READ_CONFIG_OVERRIDES), ...args],
       {
         cwd,
         encoding: 'utf8',
-        maxBuffer: MAX_BUFFER,
+        maxBuffer: options.maxBuffer ?? MAX_BUFFER,
         windowsHide: true,
         timeout: options.timeout ?? 20000,
         signal: options.signal,
-        env: network ? fetchEnv() : readEnv(),
+        env,
       },
-      (error, stdout) => {
-        if (error) resolve({ ok: false, message: String(error.message ?? error) })
+      (error, stdout, stderr) => {
+        if (error) resolve({ ok: false, code: error.code, message: String(stderr || error.message || error) })
         else resolve({ ok: true, stdout })
       },
     )
   })
 }
 
+let gitSupport
+function supportsGit() {
+  // Git <=2.35.1 treats fsmonitor=false as a hook named "false". Older Git
+  // also lacks GIT_CONFIG_COUNT. Refuse versions without both safety controls.
+  gitSupport ??= runGit(['--version']).then((result) => {
+    const version = result.ok && /git version (\d+)\.(\d+)/.exec(result.stdout)
+    return version && (Number(version[1]) > 2 || Number(version[1]) === 2 && Number(version[2]) >= 36)
+  })
+  return gitSupport
+}
+async function git(args, cwd, options = {}) {
+  if (!(await supportsGit())) return { ok: false, code: 'unsupported-git-version', message: 'Git 2.36 or newer is required' }
+  const storage = repositoryStorage(cwd, options.ctx)
+  if (storage === null) return { ok: false, code: 'repository-boundary', message: 'repository-boundary: Git metadata must belong to registered workspaces; object alternates are not supported' }
+  const safeArgs = !options.network && ['log', 'show'].includes(args[0])
+    ? [args[0], '--no-textconv', '--no-ext-diff', ...args.slice(1)]
+    : args
+  return runGit([`--git-dir=${storage.gitDir}`, `--work-tree=${cwd}`, ...safeArgs], cwd, options)
+}
+
 /**
- * 枚举仓库本地配置里可能执行外部程序的键，返回把它们置空的 `-c key=` 覆盖项。
+ * 枚举所有生效作用域内可能执行外部程序的配置键，以独立键值覆盖。
  * git status 在需要把工作区内容转换回 git 对象时会执行 filter driver
  * （`.gitattributes` 选中的 `filter.<driver>.clean` / `.process`），因此只读
  * 扫描也必须先中和这些键；键名因仓库而异，只能在每个仓库上枚举。
  * 这里只读 `git config`，不会执行任何配置里的程序。
  * @param {string} repo 仓库目录。
- * @returns {Promise<string[]>} 追加到只读命令上的 `-c` 覆盖项。
+ * @returns {Promise<{ok: boolean, config?: string[][], message?: string}>} 配置覆盖或失败原因。
  */
-function readOnlyConfigNeutralisers(repo) {
-  const pattern = '^(filter\\..*\\.(clean|smudge|process)|diff\\..*\\.(command|textconv)|diff\\.external)$'
-  return new Promise((resolve) => {
-    execFile(
-      'git',
-      ['config', '--local', '--includes', '--get-regexp', pattern],
-      {
-        cwd: repo,
-        encoding: 'utf8',
-        maxBuffer: 1024 * 1024,
-        windowsHide: true,
-        timeout: 5000,
-        env: readEnv(),
-      },
-      (error, stdout) => {
-        // 退出码 1 表示没有任何匹配项（正常情况）；其他错误交给后续 git 命令自己报告。
-        if (error) {
-          resolve([])
-          return
-        }
-        const overrides = []
-        for (const line of String(stdout).split('\n')) {
-          const key = line.trim().split(/\s+/)[0]
-          if (key === '' || overrides.includes(key)) continue
-          overrides.push('-c', `${key}=`)
-        }
-        resolve(overrides)
-      },
-    )
+async function readOnlyConfigNeutralisers(repo, signal, ctx) {
+  const pattern = '^(filter\\..*\\.(clean|smudge|process|required)|diff\\..*\\.(command|textconv)|diff\\.external)$'
+  // Default scope includes system/global/local/worktree and conditional includes.
+  // Only names are emitted: multiline and huge values cannot become arguments.
+  const result = await git(['config', '--null', '--name-only', '--includes', '--get-regexp', pattern], repo, {
+    signal, ctx, timeout: 5000, maxBuffer: 128 * 1024,
   })
+  if (!result.ok && result.code !== 1) return { ok: false, message: 'unsafe-config: unable to enumerate Git configuration' }
+  const keys = result.ok ? [...new Set(result.stdout.split('\0').filter(Boolean))] : []
+  if (keys.length > 512 || keys.some((key) => !/^(filter\..*\.(clean|smudge|process|required)|diff\..*\.(command|textconv)|diff\.external)$/.test(key))) {
+    return { ok: false, message: 'unsafe-config: unsupported Git configuration keys' }
+  }
+  return { ok: true, config: keys.map((key) => [key, key.endsWith('.required') ? 'false' : '']) }
 }
 
 /**
@@ -379,6 +420,37 @@ function resolveWorkspaceRoot(value) {
   }
 }
 
+/** Bound administrative storage as well as the worktree; legitimate linked
+ * worktrees remain usable when their main repository is also registered. */
+function repositoryStorage(repo, ctx) {
+  if (!ctx || !isInsideWorkspace(ctx, repo)) return null
+  const readPointer = (file) => {
+    if (statSync(file).size > 8192) throw new Error('oversized Git pointer')
+    return readFileSync(file, 'utf8').trim()
+  }
+  try {
+    let gitDir = path.join(repo, '.git')
+    if (statSync(gitDir).isFile()) {
+      const pointer = readPointer(gitDir)
+      if (!pointer.startsWith('gitdir: ')) return null
+      gitDir = path.resolve(repo, pointer.slice(8))
+    }
+    gitDir = canonicalPath(gitDir)
+    if (gitDir === null || !isInsideWorkspace(ctx, gitDir)) return null
+    let commonDir = gitDir
+    const commonFile = path.join(gitDir, 'commondir')
+    if (existsSync(commonFile)) commonDir = canonicalPath(path.resolve(gitDir, readPointer(commonFile)))
+    if (commonDir === null || !isInsideWorkspace(ctx, commonDir)) return null
+    const objects = canonicalPath(path.join(commonDir, 'objects'))
+    if (objects === null || !isInsideWorkspace(ctx, objects)) return null
+    const alternates = path.join(objects, 'info', 'alternates')
+    if (existsSync(alternates) && readPointer(alternates) !== '') return null
+    return { gitDir, commonDir }
+  } catch {
+    return null
+  }
+}
+
 /**
  * 判断目录自身是否就是一个有效仓库的根（工作树以及链接工作树的 `.git` 文件都算）。
  * 仅看 `.git` 是否存在不够：`.git` 是无效目录时 git 会向**上**发现父仓库，
@@ -386,10 +458,10 @@ function resolveWorkspaceRoot(value) {
  * @param {string} repo 目录。
  * @returns {Promise<boolean>} 目录就是该仓库的根时为 true。
  */
-async function isGitRepoRoot(repo) {
+async function isGitRepoRoot(repo, ctx, signal) {
   const expected = canonicalPath(repo)
   if (expected === null) return false
-  const result = await git(['rev-parse', '--show-toplevel'], repo, { timeout: 10000 })
+  const result = await git(['rev-parse', '--show-toplevel'], repo, { timeout: 10000, ctx, signal })
   if (!result.ok) return false
   const actual = canonicalPath(result.stdout.trim())
   return actual !== null && actual === expected
@@ -400,14 +472,25 @@ async function isGitRepoRoot(repo) {
  * @param {string[]} repos 待校验目录。
  * @returns {Promise<{ repos: string[], skipped: string[] }>} 通过/跳过项。
  */
-async function filterRepoRoots(repos) {
-  const checked = await Promise.all(
-    repos.map(async (repo) => ({ repo, root: await isGitRepoRoot(repo) })),
-  )
+async function filterRepoRoots(repos, ctx, signal) {
+  const checked = await boundedMap(repos, async (repo) => ({ repo, root: await isGitRepoRoot(repo, ctx, signal) }), signal)
   return {
     repos: checked.filter((item) => item.root).map((item) => item.repo),
     skipped: checked.filter((item) => !item.root).map((item) => item.repo),
   }
+}
+
+async function boundedMap(items, action, signal) {
+  const results = new Array(items.length)
+  let cursor = 0
+  await Promise.all(Array.from({ length: Math.min(SCAN_CONCURRENCY, items.length) }, async () => {
+    while (cursor < items.length) {
+      signal?.throwIfAborted()
+      const index = cursor++
+      results[index] = await action(items[index], index)
+    }
+  }))
+  return results
 }
 
 /**
@@ -416,13 +499,15 @@ async function filterRepoRoots(repos) {
  * @param {number} maxDepth 最大递归深度。
  * @returns {Promise<{ repos: string[], truncated: boolean }>} 发现的仓库与是否因上限截断。
  */
-async function discoverRepos(root, maxDepth) {
+async function discoverRepos(root, maxDepth, signal) {
   const repos = []
   const seen = new Set()
   let visited = 0
   let truncated = false
+  let entriesSeen = 0
 
   async function walk(dir, depth) {
+    signal?.throwIfAborted()
     if (repos.length >= MAX_REPOS || visited >= MAX_DIRS) {
       truncated = true
       return
@@ -439,14 +524,16 @@ async function discoverRepos(root, maxDepth) {
       }
     }
     if (depth >= maxDepth) return
-    let entries
+    let directory
     try {
-      entries = await readdir(current, { withFileTypes: true })
+      directory = await opendir(current)
     } catch {
       return
     }
-    for (const entry of entries) {
-      if (repos.length >= MAX_REPOS || visited >= MAX_DIRS) {
+    for await (const entry of directory) {
+      signal?.throwIfAborted()
+      entriesSeen += 1
+      if (repos.length >= MAX_REPOS || visited >= MAX_DIRS || entriesSeen >= MAX_ENTRIES) {
         truncated = true
         return
       }
@@ -468,7 +555,7 @@ async function discoverRepos(root, maxDepth) {
  * @param {boolean} allBranches 是否取所有分支。
  * @param {AbortSignal} [signal] 请求取消信号。
  */
-async function readRepo(repo, root, limit, allBranches, signal) {
+async function readRepo(repo, root, limit, allBranches, signal, ctx) {
   const relative = path.relative(root, repo)
   const name = relative === '' ? path.basename(root) : relative.split(path.sep).join('/')
 
@@ -485,14 +572,17 @@ async function readRepo(repo, root, limit, allBranches, signal) {
 
   // git status 的工作区内容转换可能执行仓库配置里的 filter driver，
   // 因此先枚举并中和该仓库本地的 filter/diff 配置键（只读命令里唯一的执行面）。
-  const neutralisers = await readOnlyConfigNeutralisers(repo)
+  const neutralisers = await readOnlyConfigNeutralisers(repo, signal, ctx)
+  const metadata = { name, path: repo, branch: '', dirty: null, upstream: null, commits: [] }
+  if (!neutralisers.ok) return { ...metadata, error: neutralisers.message }
   const [statusResult, logResult] = await Promise.all([
-    git(['status', '--porcelain=v1', '-uno', '--branch'], repo, { signal, overrides: neutralisers }),
-    git(logArgs, repo, { signal }),
+    git(['status', '--porcelain=v1', '--untracked-files=normal', '--ignore-submodules=all', '--branch'], repo, { signal, ctx, config: neutralisers.config }),
+    git(logArgs, repo, { signal, ctx }),
   ])
 
   let branch = ''
-  let dirty = false
+  let dirty = null
+  const unborn = statusResult.ok && /^## (?:No commits yet on |Initial commit on )/.test(statusResult.stdout)
   let upstream = null
   let upstreamRef = ''
   if (statusResult.ok) {
@@ -540,9 +630,9 @@ async function readRepo(repo, root, limit, allBranches, signal) {
       upstreamRef,
     ]
     const [extended, remoteList] = await Promise.all([
-      git(extendedArgs, repo, { signal }),
+      git(extendedArgs, repo, { signal, ctx }),
       git(['rev-list', '-n', String(limit + extra + 20), '--end-of-options', `HEAD..${upstreamRef}`], repo, {
-        signal,
+        signal, ctx,
       }),
     ])
     if (extended.ok) effectiveLog = extended
@@ -557,17 +647,17 @@ async function readRepo(repo, root, limit, allBranches, signal) {
   const commits = []
   if (effectiveLog.ok) {
     for (const fields of splitRecords(effectiveLog.stdout, 9)) {
-      if (!/^[0-9a-fA-F]{40}$/.test(fields[0])) continue
+      if (!HASH.test(fields[0])) continue
       const hash = fields[0].toLowerCase()
       commits.push({
         repo: name,
         hash,
         short: fields[1],
-        author: fields[2],
+        author: truncate(fields[2], FIELD_LIMIT),
         date: fields[3],
-        subject: fields[4],
-        refs: fields[5].trim(),
-        source: fields[6].trim(),
+        subject: truncate(fields[4], FIELD_LIMIT),
+        refs: truncate(fields[5].trim(), FIELD_LIMIT),
+        source: truncate(fields[6].trim(), FIELD_LIMIT),
         committerDate: fields[7].trim(),
         parentCount: fields[8].trim() === '' ? 0 : fields[8].trim().split(' ').length,
         remoteOnly: remoteOnly.has(hash),
@@ -575,15 +665,16 @@ async function readRepo(repo, root, limit, allBranches, signal) {
     }
   }
 
-  return {
+  // Do not retain slices backed by large status/log stdout strings across repos.
+  return JSON.parse(JSON.stringify({
     name,
     path: repo,
     branch,
     dirty,
     upstream,
-    error: effectiveLog.ok ? null : effectiveLog.message.slice(0, 300),
+    error: !statusResult.ok ? statusResult.message.slice(0, 300) : effectiveLog.ok || unborn ? null : effectiveLog.message.slice(0, 300),
     commits,
-  }
+  }))
 }
 
 /**
@@ -591,26 +682,39 @@ async function readRepo(repo, root, limit, allBranches, signal) {
  * @param {{ root: string, limit: number, maxDepth: number, allBranches: boolean }} request
  */
 async function collect(request) {
-  const discovered = await discoverRepos(request.root, request.maxDepth)
-  const verified = await filterRepoRoots(discovered.repos)
+  const discovered = await discoverRepos(request.root, request.maxDepth, request.signal)
+  const verified = await filterRepoRoots(discovered.repos, request.ctx, request.signal)
   const repos = verified.repos
   const details = new Array(repos.length)
   let cursor = 0
+  let bytes = 0
+  let byteTruncated = false
   const workers = Math.min(SCAN_CONCURRENCY, Math.max(repos.length, 1))
 
   await Promise.all(
     Array.from({ length: workers }, async () => {
       for (;;) {
+        request.signal?.throwIfAborted()
         const index = cursor
         cursor += 1
         if (index >= repos.length) return
-        details[index] = await readRepo(
+        const detail = await readRepo(
           repos[index],
           request.root,
           request.limit,
           request.allBranches,
           request.signal,
+          request.ctx,
         )
+        const retained = []
+        for (const commit of detail.commits) {
+          const size = Buffer.byteLength(JSON.stringify(commit))
+          if (bytes + size > STATE_BYTE_LIMIT) { byteTruncated = true; break }
+          bytes += size
+          retained.push(commit)
+        }
+        detail.commits = retained
+        details[index] = detail
       }
     }),
   )
@@ -622,8 +726,8 @@ async function collect(request) {
   }
   commits.sort((left, right) => commitTime(right) - commitTime(left))
 
-  const truncated = commits.length > MAX_TOTAL_COMMITS
-  if (truncated) commits.length = MAX_TOTAL_COMMITS
+  const truncated = byteTruncated || commits.length > MAX_TOTAL_COMMITS
+  if (commits.length > MAX_TOTAL_COMMITS) commits.length = MAX_TOTAL_COMMITS
 
   return {
     root: request.root,
@@ -643,7 +747,7 @@ async function collect(request) {
  * @param {string} hash 合并提交哈希。
  * @param {AbortSignal} [signal] 请求取消信号。
  */
-async function readIntroducedCommits(repo, hash, signal) {
+async function readIntroducedCommits(repo, hash, signal, ctx) {
   const result = await git(
     [
       'log',
@@ -655,20 +759,20 @@ async function readIntroducedCommits(repo, hash, signal) {
       `${hash}^1..${hash}`,
     ],
     repo,
-    { signal },
+    { signal, ctx },
   )
   if (!result.ok) return { commits: [], truncated: false }
 
   const commits = []
   for (const fields of splitRecords(result.stdout, 6)) {
-    if (!/^[0-9a-fA-F]{40}$/.test(fields[0])) continue
+    if (!HASH.test(fields[0])) continue
     commits.push({
       hash: fields[0].toLowerCase(),
       short: fields[1],
-      author: fields[2],
+      author: truncate(fields[2], FIELD_LIMIT),
       date: fields[3],
       committerDate: fields[4],
-      subject: fields[5],
+      subject: truncate(fields[5], FIELD_LIMIT),
     })
   }
   const truncated = commits.length > MERGE_COMMIT_LIMIT
@@ -690,6 +794,41 @@ function jsonResponse(status, value) {
       'cache-control': 'no-store',
     },
   })
+}
+
+function readFailure(result, fallback) {
+  const error = result.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
+    ? 'resource-limit'
+    : /unable to read|missing|could not fetch|not allowed|bad (?:object|tree object)/i.test(result.message)
+      ? 'offline-object-missing'
+      : fallback
+  return jsonResponse(error === 'resource-limit' ? 413 : 404, { error, message: result.message.slice(0, 300) })
+}
+
+let activeRequests = 0
+/** Shared work budget, including traversal, metadata validation and subprocesses. */
+async function runRequest(request, ctx, handler) {
+  if (activeRequests >= 4) return jsonResponse(429, { error: 'resource-limit' })
+  activeRequests += 1
+  const control = new AbortController()
+  const abort = () => control.abort()
+  request.signal.addEventListener('abort', abort, { once: true })
+  if (request.signal.aborted) abort()
+  const deadline = setTimeout(abort, REQUEST_TIMEOUT_MS)
+  try {
+    control.signal.throwIfAborted()
+    if (!(await supportsGit())) return jsonResponse(503, { error: 'unsupported-git-version' })
+    const response = await handler(new Request(request, { signal: control.signal }), ctx)
+    control.signal.throwIfAborted()
+    return response
+  } catch (error) {
+    if (control.signal.aborted) return jsonResponse(408, { error: 'request-cancelled' })
+    return jsonResponse(500, { error: 'request-failed' })
+  } finally {
+    clearTimeout(deadline)
+    request.signal.removeEventListener('abort', abort)
+    activeRequests -= 1
+  }
 }
 
 /**
@@ -715,8 +854,8 @@ async function handleState(request, ctx) {
   const cached = stateCache.get(cacheKey)
   if (cached !== undefined) return jsonResponse(200, cached.value)
 
-  const value = await collect({ root, limit, maxDepth, allBranches, signal: request.signal })
-  if (!request.signal.aborted) setBoundedCache(stateCache, cacheKey, value, STATE_CACHE_LIMIT)
+  const value = await collect({ root, limit, maxDepth, allBranches, signal: request.signal, ctx })
+  if (!request.signal.aborted) setBoundedCache(stateCache, cacheKey, value, STATE_CACHE_LIMIT, STATE_CACHE_BYTE_LIMIT)
   return jsonResponse(200, value)
 }
 
@@ -732,8 +871,8 @@ async function handleCommit(request, ctx) {
   const hash = url.searchParams.get('hash') ?? ''
   if (repo === null) return jsonResponse(400, { error: 'invalid-repo', repo: requested ?? '' })
   if (!isInsideWorkspace(ctx, repo)) return jsonResponse(403, { error: 'outside-workspace', repo })
-  if (!(await isGitRepoRoot(repo))) return jsonResponse(400, { error: 'invalid-repo', repo })
-  if (!/^[0-9a-fA-F]{7,40}$/.test(hash)) return jsonResponse(400, { error: 'invalid-hash', hash })
+  if (!(await isGitRepoRoot(repo, ctx, request.signal))) return jsonResponse(400, { error: 'invalid-repo', repo })
+  if (!REQUEST_HASH.test(hash)) return jsonResponse(400, { error: 'invalid-hash', hash })
 
   const cacheKey = `${repo}|${hash.toLowerCase()}`
   pruneCache(commitCache, COMMIT_CACHE_TTL)
@@ -748,24 +887,24 @@ async function handleCommit(request, ctx) {
     hash,
   ]
   const [metaResult, nameStatusResult, numstatResult] = await Promise.all([
-    git(metaArgs, repo, { signal: request.signal }),
+    git(metaArgs, repo, { signal: request.signal, ctx }),
     git(
-      ['show', '--name-status', '--pretty=format:', '--no-renames', '-m', '--first-parent', '--end-of-options', hash],
+      ['show', '--name-status', '-z', '--pretty=format:', '--no-renames', '-m', '--first-parent', '--end-of-options', hash],
       repo,
-      { signal: request.signal },
+      { signal: request.signal, ctx },
     ),
     git(
-      ['show', '--numstat', '--pretty=format:', '--no-renames', '-m', '--first-parent', '--end-of-options', hash],
+      ['show', '--numstat', '-z', '--pretty=format:', '--no-renames', '-m', '--first-parent', '--end-of-options', hash],
       repo,
-      { signal: request.signal },
+      { signal: request.signal, ctx },
     ),
   ])
 
   if (!metaResult.ok) {
-    return jsonResponse(404, {
-      error: 'commit-not-found',
-      message: metaResult.message.slice(0, 300),
-    })
+    return readFailure(metaResult, 'commit-not-found')
+  }
+  if (!nameStatusResult.ok || !numstatResult.ok) {
+    return readFailure(!nameStatusResult.ok ? nameStatusResult : numstatResult, 'commit-not-found')
   }
 
   const fields = metaResult.stdout.replace(/^[\r\n]+/, '').split(FIELD_SEP)
@@ -776,26 +915,26 @@ async function handleCommit(request, ctx) {
 
   const lineCounts = new Map()
   if (numstatResult.ok) {
-    for (const line of numstatResult.stdout.split('\n')) {
-      const parts = line.split('\t')
-      if (parts.length < 3) continue
-      lineCounts.set(parts.slice(2).join('\t'), {
-        insertions: parts[0] === '-' ? null : Number(parts[0]),
-        deletions: parts[1] === '-' ? null : Number(parts[1]),
+    for (const record of numstatResult.stdout.split('\0')) {
+      const match = /^(\d+|-)\t(\d+|-)\t([\s\S]+)$/.exec(record)
+      if (match === null) continue
+      lineCounts.set(match[3], {
+        insertions: match[1] === '-' ? null : Number(match[1]),
+        deletions: match[2] === '-' ? null : Number(match[2]),
       })
     }
   }
 
   const files = []
   if (nameStatusResult.ok) {
-    for (const line of nameStatusResult.stdout.split('\n')) {
-      if (line.trim() === '') continue
-      const parts = line.split('\t')
-      if (parts.length < 2) continue
-      const filePath = parts[parts.length - 1]
+    const records = nameStatusResult.stdout.split('\0')
+    for (let index = 0; index + 1 < records.length; index += 2) {
+      const status = records[index]
+      const filePath = records[index + 1]
+      if (status === '' || filePath === '') continue
       const counts = lineCounts.get(filePath) ?? { insertions: 0, deletions: 0 }
       files.push({
-        status: parts[0],
+        status,
         path: filePath,
         insertions: counts.insertions,
         deletions: counts.deletions,
@@ -810,31 +949,40 @@ async function handleCommit(request, ctx) {
     if (typeof file.deletions === 'number') deletions += file.deletions
   }
   const fileCount = files.length
-  const filesTruncated = fileCount > MAX_FILES
-  if (filesTruncated) files.length = MAX_FILES
+  let retainedBytes = 0
+  let retainedCount = 0
+  for (const file of files) {
+    const size = Buffer.byteLength(JSON.stringify(file))
+    if (retainedCount >= MAX_FILES || retainedBytes + size > FILE_LIST_BYTE_LIMIT) break
+    retainedBytes += size
+    retainedCount += 1
+  }
+  const filesTruncated = fileCount > retainedCount
+  files.length = retainedCount
 
   const parents = (fields[8] ?? '').split(' ').filter((item) => item !== '')
   let merge = null
   if (parents.length > 1) {
-    const introduced = await readIntroducedCommits(repo, hash, request.signal)
+    const introduced = await readIntroducedCommits(repo, hash, request.signal, ctx)
     merge = { base: parents[0], introduced: introduced.commits, truncated: introduced.truncated }
   }
 
   const value = {
     hash: fields[0] ?? hash,
     short: fields[1] ?? hash.slice(0, 8),
-    author: { name: fields[2] ?? '', email: fields[3] ?? '', date: fields[4] ?? '' },
-    committer: { name: fields[5] ?? '', email: fields[6] ?? '', date: fields[7] ?? '' },
+    author: { name: truncate(fields[2] ?? '', FIELD_LIMIT), email: truncate(fields[3] ?? '', FIELD_LIMIT), date: fields[4] ?? '' },
+    committer: { name: truncate(fields[5] ?? '', FIELD_LIMIT), email: truncate(fields[6] ?? '', FIELD_LIMIT), date: fields[7] ?? '' },
     parents,
     merge,
-    refs: fields[9] ?? '',
+    refs: truncate(fields[9] ?? '', FIELD_LIMIT),
     subject,
     body,
     files,
     filesTruncated,
     stat: { files: fileCount, insertions, deletions },
   }
-  if (!request.signal.aborted) setBoundedCache(commitCache, cacheKey, value, COMMIT_CACHE_LIMIT)
+  if (Buffer.byteLength(JSON.stringify(value)) > DETAIL_BYTE_LIMIT) return jsonResponse(413, { error: 'resource-limit' })
+  if (!request.signal.aborted) setBoundedCache(commitCache, cacheKey, value, COMMIT_CACHE_LIMIT, COMMIT_CACHE_BYTE_LIMIT)
   return jsonResponse(200, value)
 }
 
@@ -853,14 +1001,18 @@ async function handleFetch(request, ctx) {
   if (fetchLocks.has(root)) return jsonResponse(409, { error: 'fetch-in-progress', root })
 
   const control = new AbortController()
+  const abort = () => control.abort()
+  request.signal.addEventListener('abort', abort, { once: true })
+  if (request.signal.aborted) abort()
   fetchLocks.set(root, control)
   const deadline = setTimeout(() => control.abort(), FETCH_TOTAL_TIMEOUT_MS)
   const started = Date.now()
   const results = []
 
   try {
-    const discovered = await discoverRepos(root, 4)
-    const verified = await filterRepoRoots(discovered.repos)
+    const signal = control.signal
+    const discovered = await discoverRepos(root, 4, signal)
+    const verified = await filterRepoRoots(discovered.repos, ctx, signal)
     for (const repo of verified.skipped) {
       results.push({
         name: path.relative(root, repo) || '.',
@@ -871,10 +1023,6 @@ async function handleFetch(request, ctx) {
       })
     }
     const queue = [...verified.repos]
-    const signal =
-      typeof AbortSignal.any === 'function'
-        ? AbortSignal.any([request.signal, control.signal])
-        : control.signal
 
     await Promise.all(
       Array.from({ length: Math.min(FETCH_CONCURRENCY, Math.max(queue.length, 1)) }, async () => {
@@ -887,6 +1035,7 @@ async function handleFetch(request, ctx) {
             timeout: FETCH_TIMEOUT_MS,
             signal,
             network: true,
+            ctx,
           })
           results.push({
             name,
@@ -912,6 +1061,7 @@ async function handleFetch(request, ctx) {
     })
   } finally {
     clearTimeout(deadline)
+    request.signal.removeEventListener('abort', abort)
     if (fetchLocks.get(root) === control) fetchLocks.delete(root)
   }
 }
@@ -930,10 +1080,10 @@ async function handlePatch(request, ctx) {
 
   if (repo === null) return jsonResponse(400, { error: 'invalid-repo', repo: requested ?? '' })
   if (!isInsideWorkspace(ctx, repo)) return jsonResponse(403, { error: 'outside-workspace', repo })
-  if (!(await isGitRepoRoot(repo))) return jsonResponse(400, { error: 'invalid-repo', repo })
-  if (!/^[0-9a-fA-F]{7,40}$/.test(hash)) return jsonResponse(400, { error: 'invalid-hash', hash })
+  if (!(await isGitRepoRoot(repo, ctx, request.signal))) return jsonResponse(400, { error: 'invalid-repo', repo })
+  if (!REQUEST_HASH.test(hash)) return jsonResponse(400, { error: 'invalid-hash', hash })
   if (file === '' || file.includes('\u0000')) return jsonResponse(400, { error: 'invalid-file', file })
-  if (file.startsWith(':')) return jsonResponse(400, { error: 'invalid-file', file })
+  // GIT_LITERAL_PATHSPECS disables magic, including a leading colon.
   if (path.isAbsolute(file) || file.split(/[\\/]/).includes('..')) {
     return jsonResponse(400, { error: 'invalid-file', file })
   }
@@ -954,10 +1104,10 @@ async function handlePatch(request, ctx) {
       file,
     ],
     repo,
-    { signal: request.signal },
+    { signal: request.signal, ctx },
   )
   if (!result.ok) {
-    return jsonResponse(404, { error: 'patch-not-found', message: result.message.slice(0, 300) })
+    return readFailure(result, 'patch-not-found')
   }
 
   const rawLines = result.stdout.split('\n')
@@ -1026,7 +1176,7 @@ export function apply(ctx) {
         path: ROUTE_STATE,
         methods: ['GET'],
         requestBody: 'buffered',
-        fetch: (request) => handleState(request, ctx),
+        fetch: (request) => runRequest(request, ctx, handleState),
       }),
     'git-multirepo: state route',
   )
@@ -1036,7 +1186,7 @@ export function apply(ctx) {
         path: ROUTE_COMMIT,
         methods: ['GET'],
         requestBody: 'buffered',
-        fetch: (request) => handleCommit(request, ctx),
+        fetch: (request) => runRequest(request, ctx, handleCommit),
       }),
     'git-multirepo: commit route',
   )
@@ -1046,7 +1196,7 @@ export function apply(ctx) {
         path: ROUTE_FETCH,
         methods: ['POST'],
         requestBody: 'buffered',
-        fetch: (request) => handleFetch(request, ctx),
+        fetch: (request) => runRequest(request, ctx, handleFetch),
       }),
     'git-multirepo: fetch route',
   )
@@ -1056,7 +1206,7 @@ export function apply(ctx) {
         path: ROUTE_PATCH,
         methods: ['GET'],
         requestBody: 'buffered',
-        fetch: (request) => handlePatch(request, ctx),
+        fetch: (request) => runRequest(request, ctx, handlePatch),
       }),
     'git-multirepo: patch route',
   )
