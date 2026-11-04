@@ -2,7 +2,7 @@
 
 在 DSH 中集中查看多个 Git 仓库的提交记录。
 
-[English](README.md) · 简体中文
+[English](https://github.com/drypeek/dsh-git-multirepo/blob/main/README.md) · 简体中文
 
 工作区里同时有前端、后端或工具仓库时，可以在「多仓库日志」页签中一起查看它们的历史，不必逐个切换目录。提交按时间排列，并标明所属仓库。
 
@@ -19,21 +19,25 @@
 
 需要 DSH 0.2.1-rc.5 至 0.2.x、Git 2.36+，运行环境需满足 Node.js 20+。
 
-先将仓库下载到本地：
+从 npm 安装（[dsh-git-multirepo](https://www.npmjs.com/package/dsh-git-multirepo)）。在 DSH 侧边栏打开 **插件 → 添加插件 → 安装第三方插件**，输入 `dsh-git-multirepo`；或执行：
 
 ```sh
-git clone https://github.com/drypeek/dsh-git-multirepo.git
+dsh plugin --profile <profile> add dsh-git-multirepo
 ```
 
-在 DSH 侧边栏打开 **插件 → 添加插件 → 安装第三方插件**，选择下载后的仓库目录。安装后默认启用；如果之前手动关闭过，请在插件页重新启用。
+安装后默认启用；如果之前手动关闭过，请在插件页重新启用。桌面版安装或升级后需要重启 DSH；Web 版刷新页面即可。打开会话后，「对话」「轨迹」旁会出现 **多仓库日志** 页签。
 
-桌面版安装或升级后需要重启 DSH；Web 版刷新页面即可。打开会话后，「对话」「轨迹」旁会出现 **多仓库日志** 页签。
+其他安装方式：
 
-也可以通过命令行安装，将下面的 profile 和路径替换为自己的配置：
-
-```sh
-dsh plugin --profile <profile> add "link:/absolute/path/to/dsh-git-multirepo"
-```
+- 从最新 GitHub Release 安装预构建包：
+  ```sh
+  dsh plugin --profile <profile> add https://github.com/drypeek/dsh-git-multirepo/releases/latest/download/dsh-git-multirepo.tgz
+  ```
+- 本地目录，适合开发调试：
+  ```sh
+  git clone https://github.com/drypeek/dsh-git-multirepo.git
+  dsh plugin --profile <profile> add "link:/absolute/path/to/dsh-git-multirepo"
+  ```
 
 ## 使用
 
@@ -76,7 +80,7 @@ dsh plugin --profile <profile> add "link:/absolute/path/to/dsh-git-multirepo"
 
 拉取会使用你已有的 SSH 和 Git 凭据配置，也可能运行仓库配置的程序，因此只对可信仓库使用这一操作。系统和全局 Git 配置同样被视为你信任的配置。
 
-各接口交由 DSH 鉴权，仓库路径限制在已注册的工作区内。具体防护、适用范围和漏洞反馈方式见 [SECURITY.md](SECURITY.md)。
+各接口交由 DSH 鉴权，仓库路径限制在已注册的工作区内。具体防护、适用范围和漏洞反馈方式见 [SECURITY.md](https://github.com/drypeek/dsh-git-multirepo/blob/main/SECURITY.md)。
 
 ## 开发
 
@@ -91,4 +95,4 @@ npm test
 
 ## 许可证
 
-[MIT](LICENSE)
+[MIT](https://github.com/drypeek/dsh-git-multirepo/blob/main/LICENSE)

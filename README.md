@@ -2,7 +2,7 @@
 
 View commits from several Git repositories together in DSH.
 
-English · [简体中文](README.zh.md)
+English · [简体中文](https://github.com/drypeek/dsh-git-multirepo/blob/main/README.zh.md)
 
 If a workspace contains separate frontend, backend, or tooling repositories, the **Repositories** tab shows their commits in one timeline. Each commit is labelled with its repository.
 
@@ -19,21 +19,25 @@ This is a third-party plugin for DeepSeek Harness (DSH), with no affiliation to 
 
 Requires DSH 0.2.1-rc.5 through 0.2.x, Git 2.36+, and a Node.js 20+ runtime.
 
-Clone the repository:
+Install from npm ([dsh-git-multirepo](https://www.npmjs.com/package/dsh-git-multirepo)). In the DSH desktop app, open **Plugins → Add plugin → Install a third-party plugin** and enter `dsh-git-multirepo`, or run:
 
 ```sh
-git clone https://github.com/drypeek/dsh-git-multirepo.git
+dsh plugin --profile <profile> add dsh-git-multirepo
 ```
 
-In the DSH sidebar, open **Plugins → Add plugin → Install a third-party plugin** and select the cloned directory. Installation enables the bundle by default; re-enable it on the Plugins page if you previously switched it off.
+Installation enables the bundle by default; re-enable it on the Plugins page if you previously switched it off. Restart the desktop app after installing or updating; for the Web GUI, refresh the page. The **Repositories** tab then appears beside **Chat** and **Trajectory** in a session.
 
-Restart the desktop app after installing or updating. For the Web GUI, refresh the page. The **Repositories** tab appears beside **Chat** and **Trajectory** in a session.
+Other install targets:
 
-Alternatively, use the CLI, replacing the profile and path with your own:
-
-```sh
-dsh plugin --profile <profile> add "link:/absolute/path/to/dsh-git-multirepo"
-```
+- Prebuilt tarball from the latest GitHub Release:
+  ```sh
+  dsh plugin --profile <profile> add https://github.com/drypeek/dsh-git-multirepo/releases/latest/download/dsh-git-multirepo.tgz
+  ```
+- Local checkout, for development:
+  ```sh
+  git clone https://github.com/drypeek/dsh-git-multirepo.git
+  dsh plugin --profile <profile> add "link:/absolute/path/to/dsh-git-multirepo"
+  ```
 
 ## Usage
 
@@ -74,7 +78,7 @@ The plugin has no telemetry or analytics. Normal viewing reads local history; Gi
 
 Fetch uses your existing SSH and Git credential configuration and may run programs configured by a repository. Use it only with repositories you trust. System and global Git configuration are also treated as trusted user configuration.
 
-DSH handles route authentication, and repository paths are restricted to registered workspaces. See [SECURITY.md](SECURITY.md) for the controls, limitations, and vulnerability reporting process.
+DSH handles route authentication, and repository paths are restricted to registered workspaces. See [SECURITY.md](https://github.com/drypeek/dsh-git-multirepo/blob/main/SECURITY.md) for the controls, limitations, and vulnerability reporting process.
 
 ## Development
 
@@ -89,4 +93,4 @@ Tests use temporary repositories and local test programs, without contacting ext
 
 ## License
 
-[MIT](LICENSE)
+[MIT](https://github.com/drypeek/dsh-git-multirepo/blob/main/LICENSE)
