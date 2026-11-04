@@ -1,70 +1,92 @@
 # dsh-git-multirepo
 
-**See the history of every git repository in your DSH workspace as one list — inside the conversation header.**
+View commits from several Git repositories together in DSH.
 
-English | [简体中文](README.zh.md)
+English · [简体中文](README.zh.md)
 
-> Unofficial third-party plugin for DeepSeek Harness; not affiliated with or endorsed by DeepSeek.
+If a workspace contains separate frontend, backend, or tooling repositories, the **Repositories** tab shows their commits in one timeline. Each commit is labelled with its repository.
 
----
+This is a third-party plugin for DeepSeek Harness (DSH), with no affiliation to DeepSeek.
 
-If your workspace contains several repositories side by side, checking them one at a time is slow and easy to forget. This plugin finds all of them automatically and shows their commits together, so you can answer "what changed lately, and which repositories are behind?" in a single glance.
+## Features
 
-## What you get
+- Browse the current branch or all branches. In current-branch mode, incoming remote commits have their own section.
+- Expand commit messages and changed files; open a file diff in the right sidebar.
+- Filter by repository, date, commit message, author, or short hash.
+- Check uncommitted changes and ahead/behind counts, and fetch updates for multiple repositories.
 
-- **One timeline for the whole workspace.** Commits from every repository, newest first, each row labelled with its repository.
-- **A clear split between incoming and local.** Commits that exist only on the remote are grouped in their own collapsible section, so remote work that hasn't been merged locally never gets lost among the rest.
-- **Details on demand.** Click a commit to see its message, author, timestamps, hashes and changed files. Click a file to open its diff in the right sidebar.
-- **Fetch everything at once.** One button updates all repositories and tells you which ones failed. Each repository also shows how far ahead or behind it is.
-- **Filtering that stays out of the way.** Hide repositories you don't care about, restrict by date, or search commit messages, authors and hashes.
-- **Stays put while you scroll.** The toolbar is pinned, with one-click jumps to the top and to your current position.
-- **A full-height view.** While the **Repositories** tab is open, the chat input is hidden so the timeline gets the whole window; switch to **Chat** to type.
+## Installation
 
-## Install
+Requires DSH 0.2.1-rc.5 through 0.2.x, Git 2.36+, and a Node.js 20+ runtime.
 
-Requires DSH 0.2.1-rc.5 through 0.2.x (the diff view uses the right-sidebar tab services), Node.js 20+, and Git 2.36+ (safe configuration overrides and fsmonitor disabling). SHA-1 and SHA-256 repositories are supported.
+Clone the repository:
 
-Install this directory as a plugin bundle:
+```sh
+git clone https://github.com/drypeek/dsh-git-multirepo.git
+```
 
-1. In DSH, open **Plugins** in the sidebar and choose **Add plugin → Install a third-party plugin**, then pick this checkout (package name, Git URL, or local directory).
-2. Installation enables the bundle by default. If it is switched off, turn it on in the same **Plugins** page. The CLI equivalent is `dsh plugin --profile <profile> add link:/path/to/dsh-git-multirepo`.
+In the DSH sidebar, open **Plugins → Add plugin → Install a third-party plugin** and select the cloned directory. Installation enables the bundle by default; re-enable it on the Plugins page if you previously switched it off.
 
-Then refresh the Web GUI — a **Repositories** tab appears next to *Chat* and *Trajectory*.
+Restart the desktop app after installing or updating. For the Web GUI, refresh the page. The **Repositories** tab appears beside **Chat** and **Trajectory** in a session.
 
-> **Desktop app:** plugin bundles are not hot-reloaded the way they are in the browser. Restart DSH after installing or updating.
+Alternatively, use the CLI, replacing the profile and path with your own:
 
-## Using it
+```sh
+dsh plugin --profile <profile> add "link:/absolute/path/to/dsh-git-multirepo"
+```
 
-1. Open the **Repositories** tab.
-2. The plugin scans the current session's working directory and finds every repository inside it (dependency and build directories such as `node_modules`, `bin`, `obj`, `dist`, `target`, and dot-directories are skipped).
-3. Click **Fetch** to bring down the latest from your remotes, or **Refresh** to rescan what's already local.
-4. Click any commit to expand it; click a changed file to open its diff on the right.
+## Usage
 
-## Good to know
+Open **Repositories** to scan the current session's working directory. Switching sessions changes the directory shown.
 
-- **You need to fetch to see new work.** `git log` only reads what is already on disk. Commits pushed by others appear after a fetch — the plugin never pulls or merges into your branch by itself.
-- **Fetch asks first.** It runs `git fetch` in every repository it found, so the view asks for confirmation before starting when repositories are known.
-- **Seeing is all it does.** Apart from Fetch, the plugin only reads. It never commits, pushes, merges or changes your working tree.
-- **The list is a sample.** Each repository contributes its most recent commits (40 by default), so very old history is not shown.
-- **Large results are bounded.** Long subjects and large histories/diffs are limited. A repository that exceeds Git output limits reports an error. Dirty state includes untracked files; submodules are inspected as separate repositories.
-- **Linked worktrees need registered storage.** Register the main repository as a DSH workspace too if it is outside the worktree's workspace. Git metadata/object directories must be inside registered workspaces; repositories using object alternates are skipped.
-- **Missing objects stay offline.** Reading a partial clone never fetches missing objects automatically. Use Fetch first; if your remote does not supply the requested objects, retrieve them in your terminal before reopening the diff.
-- **It looks at the current session's directory.** Switch sessions (or workspaces) to look at a different set of repositories.
+Click a commit to expand its details, then click a filename to open its diff. Repository labels control which repositories appear; use search and the date filter to narrow the list.
 
-## Privacy and safety
+| Button | Action |
+| --- | --- |
+| Refresh | Reread local history and repository status without fetching remote updates. |
+| Fetch | Run `git fetch --all --prune` in the discovered repositories, then refresh. When repositories are known, the view asks for confirmation first. |
 
-- **The plugin itself never reads or stores your credentials.** Git runs as a child process with your existing credential helper, SSH configuration and remotes — exactly as it would in your terminal. Read-only requests use a minimal environment that does not hand credential variables to git; Fetch passes only the variables git needs for credentials, not unrelated host-process secrets.
-- **Read-only Git is hardened.** Repository-local filter and diff drivers are cleared before Git can run them; trusted system/global filters (for example git-lfs) stay active, so dirty state stays accurate. The Git executable is resolved once from absolute PATH entries — a repository cannot supply its own `git` program. Enumeration failure stops the repository status read. Pagers, hooks, external diff/text conversion and Git transports are disabled for reads.
-- **Only Fetch enables Git network transports.** That is `git fetch` against the remotes you configured; other client requests go to DSH's own same-origin API. Filesystem access still follows your OS permissions. No telemetry or analytics.
-- **Requests are authenticated by DSH** and restricted to directories inside registered workspaces.
-- **Apart from Fetch, nothing in your working tree changes** — the plugin never commits, pushes or merges. Fetch updates remote-tracking refs, `FETCH_HEAD` and objects only; `git status` runs with optional lock writes disabled, so it normally leaves `.git/index` untouched.
-- **Git can run programs configured by a repository.** That is standard git behaviour (`core.sshCommand`, `credential.helper`, `remote.*.uploadpack`, `gpg.program`, `diff` drivers). Fetch runs in every repository it finds, so keep untrusted repositories out of your DSH workspaces. See [SECURITY.md](SECURITY.md) for the threat model and the hardening applied here.
+Fetch does not run `git pull`, merge branches, or update working-tree files. Incoming commits are shown for inspection; merging them is a separate step.
+
+The chat input is hidden while this tab is open. Switch back to **Chat** to type.
+
+## Common questions
+
+### Why is a repository missing?
+
+Check the current session's working directory. By default, discovery scans four levels down and lists up to 100 repositories. It skips hidden directories and dependency/build directories such as `node_modules`, `bin`, `obj`, `dist`, and `target`. The view reports when a scan limit is reached.
+
+### Why is older history missing?
+
+The list starts with the latest 40 commits per repository and has total count and size limits. Use `git log` in your terminal to browse the full history. Large commit lists, file lists, and diffs may be truncated or produce an error, with a message in the view.
+
+### Why can't a linked worktree be read?
+
+If its main repository is outside the worktree's workspace, register the main repository as a DSH workspace too. Git metadata and object directories must be inside registered workspaces. Repositories sharing objects through `objects/info/alternates` are not currently supported.
+
+### What should I do about missing objects in a partial clone?
+
+Commit and diff reads do not fetch missing objects automatically. Try **Fetch** first. If the required objects are still missing, retrieve them in your terminal and reopen the diff.
+
+## Security and privacy
+
+The plugin has no telemetry or analytics. Normal viewing reads local history; Git network transports are enabled only by **Fetch**. The plugin does not commit, push, or merge code.
+
+Fetch uses your existing SSH and Git credential configuration and may run programs configured by a repository. Use it only with repositories you trust. System and global Git configuration are also treated as trusted user configuration.
+
+DSH handles route authentication, and repository paths are restricted to registered workspaces. See [SECURITY.md](SECURITY.md) for the controls, limitations, and vulnerability reporting process.
 
 ## Development
 
-Run `npm run check` and `npm test` with Node.js 20+ and Git 2.36+. Tests use disposable
-repositories and local marker programs; no external remote is contacted.
+From the repository directory, run:
+
+```sh
+npm run check
+npm test
+```
+
+Tests use temporary repositories and local test programs, without contacting external remotes. Both checks also run automatically before `npm publish`.
 
 ## License
 
-MIT
+[MIT](LICENSE)
