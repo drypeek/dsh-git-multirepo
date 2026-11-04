@@ -27,7 +27,8 @@
     "dsh": ">=0.2.1-rc.5 <0.3.0-0"
   },
   "scripts": {
-    "check": "node --check index.js && node --check client.js"
+    "check": "node --check index.js && node --check client.js",
+    "test": "node --test"
   },
   "exports": {
     ".": "./index.js",

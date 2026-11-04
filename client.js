@@ -57,6 +57,7 @@ window.__ModuleLoader__.load({
       'summary.commits': '{count} 条提交',
       'summary.dirty': '{count} 个有未提交改动',
       'summary.clean': '全部干净',
+      'summary.unknown': '{count} 个仓库状态未知',
       'summary.filtered': '筛出 {count} 条',
       'summary.hidden': '已隐藏 {count} 个',
       'chip.showAll': '全部显示',
@@ -110,7 +111,7 @@ window.__ModuleLoader__.load({
       'state.reposTruncated': '仓库数量已达扫描上限，部分仓库未列出',
       'state.reposSkipped': '{count} 个目录不是有效仓库根，已跳过',
       'detail.retry': '重试',
-      'detail.filesTruncated': '文件过多，仅显示前 {count} 个',
+      'detail.filesTruncated': '文件列表过大，仅显示前 {count} 个',
       'error.http': '请求失败（HTTP {status}）',
       'error.outsideWorkspace': '该目录不在已注册的工作区内',
       'error.invalidRoot': '工作区目录无效',
@@ -120,6 +121,14 @@ window.__ModuleLoader__.load({
       'error.fetchInProgress': '已有拉取任务在进行，请稍后再试',
       'error.commitNotFound': '找不到该提交',
       'error.patchNotFound': '找不到该文件的差异',
+      'error.unsupportedObjectFormat': '该仓库使用了暂不支持的 Git 对象格式',
+      'error.repositoryBoundary': '仓库元数据超出当前工作区边界',
+      'error.unsafeConfig': '仓库配置无法安全读取',
+      'error.offlineObjectMissing': '缺少对象；只读查看不会联网补取',
+      'error.resourceLimit': '仓库规模超过本次读取上限',
+      'error.unsupportedGitVersion': 'Git 版本过低，无法安全读取',
+      'error.requestCancelled': '读取请求已取消',
+      'error.requestFailed': '读取请求失败',
     }
 
     /** 英文文案。 */
@@ -149,6 +158,7 @@ window.__ModuleLoader__.load({
       'summary.commits': '{count} commits',
       'summary.dirty': '{count} with uncommitted changes',
       'summary.clean': 'All clean',
+      'summary.unknown': '{count} repositories have unknown status',
       'summary.filtered': '{count} shown',
       'summary.hidden': '{count} hidden',
       'chip.showAll': 'Show all',
@@ -202,7 +212,7 @@ window.__ModuleLoader__.load({
       'state.reposTruncated': 'Repository scan hit its limit; some repositories are not listed',
       'state.reposSkipped': '{count} directories are not valid repository roots and were skipped',
       'detail.retry': 'Retry',
-      'detail.filesTruncated': 'Too many files; showing the first {count}',
+      'detail.filesTruncated': 'File list limited; showing the first {count}',
       'error.http': 'Request failed (HTTP {status})',
       'error.outsideWorkspace': 'This directory is outside the registered workspace',
       'error.invalidRoot': 'Invalid workspace directory',
@@ -212,6 +222,14 @@ window.__ModuleLoader__.load({
       'error.fetchInProgress': 'A fetch is already running; try again later',
       'error.commitNotFound': 'Commit not found',
       'error.patchNotFound': 'No diff found for this file',
+      'error.unsupportedObjectFormat': 'This repository uses an unsupported Git object format',
+      'error.repositoryBoundary': 'Repository metadata is outside the workspace boundary',
+      'error.unsafeConfig': 'Repository configuration could not be read safely',
+      'error.offlineObjectMissing': 'Object is missing; read-only viewing will not fetch it',
+      'error.resourceLimit': 'Repository size exceeds the read limit',
+      'error.unsupportedGitVersion': 'Git is too old for safe read-only access',
+      'error.requestCancelled': 'The read request was cancelled',
+      'error.requestFailed': 'The read request failed',
     }
 
     /** 插件样式，随视图渲染。 */
@@ -246,6 +264,7 @@ window.__ModuleLoader__.load({
 .gm-chip[aria-pressed=false]{opacity:.38}
 .gm-chip-dot{width:7px;height:7px;border-radius:50%;flex:none}
 .gm-chip-dirty{color:var(--dsw-alias-state-warn-primary)}
+.gm-chip-unknown{color:var(--dsw-alias-state-warn-primary)}
 .gm-chip-error{color:var(--dsw-alias-state-error-primary)}
 .gm-chip-track{display:inline-flex;gap:4px;font-size:10px;font-variant-numeric:tabular-nums}
 .gm-up{color:var(--dsw-alias-state-warn-primary)}
@@ -492,6 +511,35 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * 写入有上限的对象状态，按插入顺序淘汰最早的详情。
+     * @param {Record<string, unknown>} record 目标状态对象。
+     * @param {string} key 条目键。
+     * @param {unknown} value 条目值。
+     * @param {number} limit 条目上限。
+     * @returns {Record<string, unknown>} 新状态对象。
+     */
+    function rememberRecord(record, key, value, limit) {
+      const next = { ...record, [key]: value }
+      const keys = Object.keys(next)
+      while (keys.length > limit) {
+        const oldest = keys.shift()
+        if (oldest !== undefined) delete next[oldest]
+      }
+      return next
+    }
+
+    /**
+     * 判断提交引用是否指向当前 HEAD，包括 detached HEAD。
+     * @param {string} refs git 的 %D 输出。
+     */
+    function isHeadRef(refs) {
+      return refs
+        .split(',')
+        .map((item) => item.trim())
+        .some((item) => item === 'HEAD' || item.startsWith('HEAD -> '))
+    }
+
     /** 差异页签参数持久化键：DSH 只持久化页签的 contentId/title，不持久化 navigation.params。 */
     const TAB_PARAMS_KEY = 'dsh-git-multirepo:tab-params:v1'
     /** 最多记住多少个差异页签的定位参数。 */
@@ -544,6 +592,14 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** Empty navigation parameters are also used by the host on restoration. */
+    function tabParams(tab) {
+      const params = tab.navigation?.params
+      if (params !== null && typeof params === 'object' && Object.keys(params).length > 0) return params
+      const contentId = typeof tab.contentId === 'string' ? tab.contentId : ''
+      return recallTabParams(contentId) ?? {}
+    }
+
     /**
      * 按仓库路径稳定分配配色，避免重扫/新增仓库后颜色整体位移。
      * @param {string} value 仓库路径或名字。
@@ -566,6 +622,14 @@ window.__ModuleLoader__.load({
       'fetch-in-progress': 'error.fetchInProgress',
       'commit-not-found': 'error.commitNotFound',
       'patch-not-found': 'error.patchNotFound',
+      'unsupported-object-format': 'error.unsupportedObjectFormat',
+      'repository-boundary': 'error.repositoryBoundary',
+      'unsafe-config': 'error.unsafeConfig',
+      'offline-object-missing': 'error.offlineObjectMissing',
+      'resource-limit': 'error.resourceLimit',
+      'unsupported-git-version': 'error.unsupportedGitVersion',
+      'request-cancelled': 'error.requestCancelled',
+      'request-failed': 'error.requestFailed',
     }
 
     /**
@@ -641,7 +705,7 @@ window.__ModuleLoader__.load({
         const { tab } = useTabInfo()
         const contentId = typeof tab.contentId === 'string' ? tab.contentId : ''
         // 同源页面重载后 DSH 不恢复 navigation.params，用本地记住的定位参数兜底。
-        const params = tab.navigation?.params ?? recallTabParams(contentId) ?? {}
+        const params = tabParams(tab)
         const repo = typeof params.repo === 'string' ? params.repo : ''
         const hash = typeof params.hash === 'string' ? params.hash : ''
         const file = typeof params.file === 'string' ? params.file : ''
@@ -772,7 +836,7 @@ window.__ModuleLoader__.load({
     /** 差异页签的标题：文件名。 */
     function DiffTitle({ useTabInfo }) {
       const { tab } = useTabInfo()
-      const params = tab.navigation?.params ?? {}
+      const params = tabParams(tab)
       const file = typeof params.file === 'string' ? params.file : ''
       const name = file.split(/[/\\]/).pop() ?? ''
       return h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, name)
@@ -798,12 +862,18 @@ window.__ModuleLoader__.load({
         const [details, setDetails] = useState({})
         const [fetching, setFetching] = useState(false)
         const [fetchReport, setFetchReport] = useState(null)
-        const [state, setState] = useState({ status: 'idle', data: null, failure: null })
+        const [state, setState] = useState({ status: 'idle', data: null, failure: null, key: '' })
         const [confirmingFetch, setConfirmingFetch] = useState(false)
         const [openDiffError, setOpenDiffError] = useState(null)
+        const viewKey = `${typeof cwd === 'string' ? cwd : ''}|${allBranches ? 'all' : 'head'}`
         const listRef = useRef(null)
         const fetchAbortRef = useRef(null)
         const detailAbortsRef = useRef(new Map())
+        const viewKeyRef = useRef(viewKey)
+        const workspaceKeyRef = useRef(cwd)
+        // Keep the current view identity available to async callbacks immediately after a render.
+        viewKeyRef.current = viewKey
+        workspaceKeyRef.current = cwd
 
         /** 打开右侧栏差异页签；失败时把原因显示在视图里而不是抛出。 */
         const openDiffSafe = useCallback(
@@ -826,19 +896,42 @@ window.__ModuleLoader__.load({
           [],
         )
 
+        // A view instance can be reused while its session cwd changes. Cancel all work and
+        // clear state tied to the previous workspace before accepting the new responses.
+        useEffect(() => {
+          fetchAbortRef.current?.abort()
+          fetchAbortRef.current = null
+          for (const controller of detailAbortsRef.current.values()) controller.abort()
+          detailAbortsRef.current.clear()
+          setFetching(false)
+          setHiddenRepos([])
+          setExpandedKey(null)
+          setDetails({})
+          setFetchReport(null)
+          setConfirmingFetch(false)
+          setOpenDiffError(null)
+        }, [cwd])
+
+        // Search and time filters belong to a workspace, so do not carry them into a new cwd.
+        useEffect(() => {
+          setQuery('')
+          setTimeRange('all')
+        }, [cwd])
+
         useEffect(() => {
           if (typeof cwd !== 'string' || cwd === '') {
-            setState({ status: 'no-workspace', data: null, failure: null })
+            setState({ status: 'no-workspace', data: null, failure: null, key: viewKey })
             return undefined
           }
           const controller = new AbortController()
-          const slotKey = `${cwd}|${allBranches ? 'all' : 'head'}`
+          const slotKey = viewKey
           const cached = stateCache.get(slotKey)
-          setState((previous) => ({
+          setState({
             status: 'loading',
-            data: previous.data ?? cached ?? null,
+            data: cached ?? null,
             failure: null,
-          }))
+            key: slotKey,
+          })
           const params = new URLSearchParams({
             root: cwd,
             limit: String(DEFAULT_LIMIT),
@@ -850,23 +943,24 @@ window.__ModuleLoader__.load({
               return response.json()
             })
             .then((value) => {
-              if (controller.signal.aborted) return
+              if (controller.signal.aborted || viewKeyRef.current !== slotKey) return
               remember(stateCache, slotKey, value, STATE_CACHE_LIMIT)
-              setState({ status: 'ready', data: value, failure: null })
+              setState({ status: 'ready', data: value, failure: null, key: slotKey })
             })
             .catch((error) => {
-              if (controller.signal.aborted) return
+              if (controller.signal.aborted || viewKeyRef.current !== slotKey) return
               setState({
                 status: 'error',
                 data: null,
                 failure: error instanceof Error ? error.message : String(error),
+                key: slotKey,
               })
             })
           return () => controller.abort()
         }, [cwd, allBranches, reloadToken])
 
-        const cacheKey = `${cwd ?? ''}|${allBranches ? 'all' : 'head'}`
-        const data = state.data ?? stateCache.get(cacheKey) ?? null
+        const cacheKey = viewKey
+        const data = state.key === cacheKey ? state.data ?? stateCache.get(cacheKey) ?? null : stateCache.get(cacheKey) ?? null
         const repos = data?.repos ?? []
 
         const repoInfo = useMemo(() => {
@@ -874,6 +968,11 @@ window.__ModuleLoader__.load({
           for (const repo of repos) map.set(repo.name, repo)
           return map
         }, [data])
+
+        const activeHiddenRepos = useMemo(
+          () => hiddenRepos.filter((name) => repoInfo.has(name)),
+          [hiddenRepos, repoInfo],
+        )
 
         const colors = useMemo(() => {
           const map = new Map()
@@ -887,6 +986,12 @@ window.__ModuleLoader__.load({
           return map
         }, [data])
 
+        /** 详情/展开状态键必须包含仓库真实路径，避免同名仓库跨工作区复用状态。 */
+        const getDetailKey = useCallback(
+          (commit) => `${repoPaths.get(commit.repo) ?? cwd ?? commit.repo}:${commit.hash}`,
+          [repoPaths, cwd],
+        )
+
         const cutoff = useMemo(() => {
           if (timeRange === 'all') return null
           const now = new Date()
@@ -899,7 +1004,7 @@ window.__ModuleLoader__.load({
         const visible = useMemo(() => {
           const list = data?.commits ?? []
           const needle = query.trim().toLowerCase()
-          const hidden = new Set(hiddenRepos)
+          const hidden = new Set(activeHiddenRepos)
           const remote = []
           const local = []
           for (const commit of list) {
@@ -921,15 +1026,19 @@ window.__ModuleLoader__.load({
             else local.push(commit)
           }
           return { remote, local }
-        }, [data, query, hiddenRepos, cutoff])
+        }, [data, query, activeHiddenRepos, cutoff])
 
         const commits = useMemo(() => [...visible.remote, ...visible.local], [visible])
 
         const hasCommits = useMemo(() => commits.length > 0, [commits])
 
-        /** 找到跨仓库代表锚点：本地段起点，退回第一条。 */
+        /** 找到当前列表中第一个 HEAD 提交，退回本地段或第一条。 */
         const findAnchor = useCallback((container) => {
-          return container.querySelector('.gm-section-local') ?? container.querySelector('.gm-row')
+          return (
+            container.querySelector('[data-gm-head="true"]') ??
+            container.querySelector('.gm-section-local') ??
+            container.querySelector('.gm-row')
+          )
         }, [])
 
         const scrollToTop = useCallback(() => {
@@ -978,17 +1087,16 @@ window.__ModuleLoader__.load({
             }
             const repoPath = repoPaths.get(commit.repo)
             if (repoPath === undefined) {
-              setDetails((current) => ({
-                ...current,
-                [key]: { status: 'error', message: t('error.invalidRepo') },
-              }))
+              setDetails((current) =>
+                rememberRecord(current, key, { status: 'error', message: t('error.invalidRepo') }, DETAIL_CACHE_LIMIT),
+              )
               return
             }
             if (force) detailCache.delete(key)
             detailAbortsRef.current.get(key)?.abort()
             const controller = new AbortController()
             detailAbortsRef.current.set(key, controller)
-            setDetails((current) => ({ ...current, [key]: { status: 'loading' } }))
+            setDetails((current) => rememberRecord(current, key, { status: 'loading' }, DETAIL_CACHE_LIMIT))
             const params = new URLSearchParams({ repo: repoPath, hash: commit.hash })
             fetch(`${COMMIT_URL}?${params.toString()}`, { signal: controller.signal })
               .then(async (response) => {
@@ -996,35 +1104,42 @@ window.__ModuleLoader__.load({
                 return response.json()
               })
               .then((payload) => {
-                if (controller.signal.aborted) return
+                if (controller.signal.aborted || workspaceKeyRef.current !== cwd) return
                 remember(detailCache, key, payload, DETAIL_CACHE_LIMIT)
-                setDetails((current) => ({ ...current, [key]: { status: 'ready', data: payload } }))
+                setDetails((current) =>
+                  rememberRecord(current, key, { status: 'ready', data: payload }, DETAIL_CACHE_LIMIT),
+                )
               })
               .catch((error) => {
-                if (controller.signal.aborted) return
-                setDetails((current) => ({
-                  ...current,
-                  [key]: { status: 'error', message: error instanceof Error ? error.message : String(error) },
-                }))
+                if (controller.signal.aborted || workspaceKeyRef.current !== cwd) return
+                setDetails((current) =>
+                  rememberRecord(
+                    current,
+                    key,
+                    { status: 'error', message: error instanceof Error ? error.message : String(error) },
+                    DETAIL_CACHE_LIMIT,
+                  ),
+                )
               })
               .finally(() => {
                 if (detailAbortsRef.current.get(key) === controller) detailAbortsRef.current.delete(key)
               })
           },
-          [repoPaths, details, t],
+          [repoPaths, details, t, cwd],
         )
 
         const toggleCommit = useCallback(
           (commit) => {
-            const key = `${commit.repo}:${commit.hash}`
+            const key = getDetailKey(commit)
             setExpandedKey((current) => (current === key ? null : key))
             loadDetail(key, commit)
           },
-          [loadDetail],
+          [getDetailKey, loadDetail],
         )
 
         const runFetch = useCallback(() => {
           if (typeof cwd !== 'string' || cwd === '') return
+          const requestWorkspace = cwd
           fetchAbortRef.current?.abort()
           const controller = new AbortController()
           fetchAbortRef.current = controller
@@ -1038,28 +1153,30 @@ window.__ModuleLoader__.load({
               return response.json()
             })
             .then((report) => {
-              if (controller.signal.aborted) return
+              if (controller.signal.aborted || workspaceKeyRef.current !== requestWorkspace) return
               setFetchReport({
                 status: (report.failed ?? 0) > 0 ? 'partial' : 'ok',
                 count: report.results?.length ?? 0,
                 failed: report.failed ?? 0,
                 timedOut: report.timedOut === true,
               })
+              setExpandedKey(null)
               setDetails({})
               setReloadToken((value) => value + 1)
             })
             .catch((error) => {
-              if (controller.signal.aborted) return
+              if (controller.signal.aborted || workspaceKeyRef.current !== requestWorkspace) return
               setFetchReport({
                 status: 'error',
                 message: error instanceof Error ? error.message : String(error),
               })
             })
             .finally(() => {
-              if (fetchAbortRef.current === controller) fetchAbortRef.current = null
+              if (fetchAbortRef.current !== controller || workspaceKeyRef.current !== requestWorkspace) return
+              fetchAbortRef.current = null
               setFetching(false)
             })
-        }, [cwd])
+        }, [cwd, t])
 
         const toolbar = h(
           'div',
@@ -1160,7 +1277,7 @@ window.__ModuleLoader__.load({
 
         /** 渲染一条提交的详情面板。 */
         const renderDetail = (commit) => {
-          const key = `${commit.repo}:${commit.hash}`
+          const key = getDetailKey(commit)
           const entry =
             details[key] ??
             (detailCache.has(key) ? { status: 'ready', data: detailCache.get(key) } : undefined)
@@ -1258,7 +1375,8 @@ window.__ModuleLoader__.load({
                 ),
             h('div', { className: 'gm-detail-files-head' }, t('detail.files')),
             info.files.length === 0
-              ? h('div', { className: 'gm-detail-empty' }, t('detail.noFiles'))
+              ? h('div', { className: 'gm-detail-empty' }, info.filesTruncated
+                ? text(t, 'detail.filesTruncated', { count: 0 }) : t('detail.noFiles'))
               : h(
                   'ul',
                   { className: 'gm-detail-files' },
@@ -1305,7 +1423,7 @@ window.__ModuleLoader__.load({
 
         const items = []
         const pushRow = (commit) => {
-          const key = `${commit.repo}:${commit.hash}`
+          const key = getDetailKey(commit)
           const expanded = expandedKey === key
           const color = colors.get(commit.repo) ?? PALETTE[0]
           const source = branchLabel(commit, repoInfo.get(commit.repo), allBranches)
@@ -1333,7 +1451,7 @@ window.__ModuleLoader__.load({
                     }
                   },
                   'data-gm-repo': commit.repo,
-                  'data-gm-head': commit.refs.startsWith('HEAD ->') ? 'true' : undefined,
+                  'data-gm-head': isHeadRef(commit.refs) ? 'true' : undefined,
                 },
                 h('span', { className: 'gm-rail', style: { background: color } }),
                 h(
@@ -1357,7 +1475,7 @@ window.__ModuleLoader__.load({
                     'div',
                     { className: 'gm-line2' },
                     source === '' ? null : h('span', { className: 'gm-branch', title: source }, source),
-                    commit.refs.startsWith('HEAD ->')
+                    isHeadRef(commit.refs)
                       ? h('span', { className: 'gm-badge gm-badge-head', title: t('badge.headHint') }, t('badge.head'))
                       : null,
                     commit.parentCount > 1
@@ -1420,8 +1538,15 @@ window.__ModuleLoader__.load({
                 'div',
                 { className: 'gm-chips' },
                 repos.map((repo) => {
-                  const shown = !hiddenRepos.includes(repo.name)
-                  const tone = repo.error !== null ? ' gm-chip-error' : repo.dirty ? ' gm-chip-dirty' : ''
+                  const shown = !activeHiddenRepos.includes(repo.name)
+                  const repoError = typeof repo.error === 'string' && repo.error !== ''
+                  const tone = repoError
+                    ? ' gm-chip-error'
+                    : repo.dirty === null || repo.dirty === undefined
+                      ? ' gm-chip-unknown'
+                      : repo.dirty
+                        ? ' gm-chip-dirty'
+                        : ''
                   return h(
                     'button',
                     {
@@ -1430,7 +1555,7 @@ window.__ModuleLoader__.load({
                       key: repo.path,
                       'aria-pressed': shown,
                       title:
-                        repo.error !== null
+                        repoError
                           ? `${repo.name} · ${t('repo.error')}: ${repo.error}`
                           : `${repo.name} · ${repo.branch}`,
                       onClick: () => toggleRepo(repo.name),
@@ -1459,7 +1584,7 @@ window.__ModuleLoader__.load({
                         ),
                   )
                 }),
-                hiddenRepos.length === 0
+                activeHiddenRepos.length === 0
                   ? null
                   : h('button', { type: 'button', className: 'gm-chip', onClick: () => setHiddenRepos([]) }, t('chip.showAll')),
               )
@@ -1481,10 +1606,17 @@ window.__ModuleLoader__.load({
           body = h('div', { className: 'gm-list', 'data-gm-count': items.length, ref: listRef }, items)
         }
 
+        const unknownStatusCount = repos.filter(
+          (repo) => repo.dirty === null || repo.dirty === undefined || (typeof repo.error === 'string' && repo.error !== ''),
+        ).length
         const summary = [
           text(t, 'summary.repos', { count: repos.length }),
           text(t, 'summary.commits', { count: data?.total ?? 0 }),
-          dirtyCount === 0 ? t('summary.clean') : text(t, 'summary.dirty', { count: dirtyCount }),
+          unknownStatusCount > 0
+            ? text(t, 'summary.unknown', { count: unknownStatusCount })
+            : dirtyCount === 0
+              ? t('summary.clean')
+              : text(t, 'summary.dirty', { count: dirtyCount }),
         ].join(' · ')
 
         return h(
@@ -1526,7 +1658,9 @@ window.__ModuleLoader__.load({
             { className: 'gm-bar' },
             h('div', { className: 'gm-meta' }, data === null ? null : h('span', null, summary)),
             query.trim() !== '' ? h('span', { className: 'gm-meta' }, text(t, 'summary.filtered', { count: items.length })) : null,
-            hiddenRepos.length > 0 ? h('span', { className: 'gm-meta' }, text(t, 'summary.hidden', { count: hiddenRepos.length })) : null,
+            activeHiddenRepos.length > 0
+              ? h('span', { className: 'gm-meta' }, text(t, 'summary.hidden', { count: activeHiddenRepos.length }))
+              : null,
             data?.reposTruncated === true
               ? h('span', { className: 'gm-meta gm-meta-warn' }, t('state.reposTruncated'))
               : null,
