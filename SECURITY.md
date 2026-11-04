@@ -1,101 +1,68 @@
 # Security policy
 
-`dsh-git-multirepo` is an unofficial third-party plugin for DeepSeek Harness (DSH). It registers
-authenticated HTTP routes in the DSH Host process and runs `git` as child processes against the
-repositories it finds in the current workspace.
+`dsh-git-multirepo` runs Git under the DSH Host user's OS account. Repository data is rendered as text in the client. Git configuration needs separate care because it can select programs to execute.
 
-## Reporting a vulnerability
+## Report a vulnerability
 
-Please **do not open a public issue** for security problems.
+Please use this repository's **Security → Report a vulnerability** page rather than a public issue. If private reporting is unavailable, open an issue asking for a private contact channel without including vulnerability details.
 
-Use GitHub's private vulnerability reporting for this repository
-(**Security → Report a vulnerability**). If that is unavailable, open a minimal issue that only asks
-the maintainer for a private channel, without details.
+Include the plugin version, DSH version, OS, affected route or view, and reproduction steps. You can expect an initial response within about a week.
 
-Include the plugin version, DSH version, operating system, the affected route or UI surface, and
-reproduction steps. You can expect an initial response within about a week.
+The supported release line is **0.1.x**.
 
-## Supported versions
+## Trust model
 
-| Version | Supported |
-|---|---|
-| 0.1.x   | Yes       |
+| Input or operation | Treatment |
+| --- | --- |
+| Commit messages, author names, refs, file contents | Rendered as text by React; not evaluated as code. |
+| Repository-local and worktree Git configuration | Untrusted. Execution-related filter/diff settings are neutralised for reads. |
+| System and global Git configuration | Trusted user configuration. Filters such as git-lfs stay active. |
+| Fetch | A trusted-repository operation. Existing SSH commands and credential helpers may run. |
+| DSH route authentication | Provided by the Host's exact-route registry. |
 
-## Threat model
+An ordinary remote commit does not install `.git/config`. Some execution risks require a prepared local repository with attacker-controlled Git metadata. The plugin still applies its read protections to every discovered repository.
 
-The plugin reads repository data and never evaluates it: commit messages, author names, branch
-names and file contents are rendered as plain text by the Web client (React escapes them). There is
-no `innerHTML`, no dynamic code evaluation and no telemetry.
+## Read-only operations
 
-The relevant risk is that **git itself executes configuration found in a repository**. A repository
-whose `.git/config` is attacker-controlled can ask git to run programs (for example
-`core.sshCommand`, `credential.helper`, `remote.*.uploadpack`, `gpg.program` with
-`log.showSignature`, or a `diff` driver's `textconv`/`external`). Read-only inspection must suppress
-these execution paths; explicit Fetch remains a trusted-repository operation.
+The `/state`, `/commit`, and `/patch` routes use the following controls:
 
-What the plugin does about it:
+- **Executable selection.** Git is resolved once from absolute `PATH` entries and invoked by absolute path. Version detection runs from the temporary directory, not a repository. This avoids Windows selecting a repository's own `git.exe`.
+- **Version check.** Git 2.36+ is required. Older versions can interpret `core.fsmonitor=false` as a hook pathname.
+- **Repository configuration.** Before status runs, configuration key names are read in NUL-delimited form with scope information. Local/worktree filter and diff settings, including local includes, are overridden through separate `GIT_CONFIG_KEY_n` and `GIT_CONFIG_VALUE_n` values. A newline in a value or an equals sign in a key cannot become another option. Enumeration failure or an oversized inventory stops the status read.
+- **Execution controls.** Pagers, hooks, fsmonitor, signature display, external diff and text conversion are disabled. Status does not recurse into submodules; discovered submodules receive their own scan and configuration checks.
+- **Offline object reads.** `GIT_NO_LAZY_FETCH=1` and an empty `GIT_ALLOW_PROTOCOL` prevent automatic promisor fetches, even if a repository allows a protocol. Missing objects produce an error. Fetching them requires an explicit operation.
+- **Environment.** Read subprocesses receive a reduced environment without credential variables. They use `GIT_OPTIONAL_LOCKS=0` and literal pathspecs.
 
-- Read-only routes (`/state`, `/commit`, `/patch`) run git with `core.fsmonitor=false`,
-  `log.showSignature=false`, empty `gpg.program` and `diff.external`, `protocol.ext.allow=never`,
-  `GIT_OPTIONAL_LOCKS=0`, `GIT_LITERAL_PATHSPECS=1`, disabled hooks/pagers and a reduced
-  environment that omits credential variables. Git 2.36+ is required and checked at runtime:
-  older versions may treat the boolean `core.fsmonitor=false` as an executable hook name.
-- The `git` executable is resolved once from absolute `PATH` entries and always run by
-  absolute path. Windows would otherwise search the child working directory first, letting a
-  repository that contains a `git.exe` run code during a read-only scan. The version probe
-  runs from the temporary directory, never from a repository.
-- Before `git status`, the plugin enumerates NUL-delimited configuration key names from the
-  repository-local and worktree scopes, including local includes. Filter commands are cleared
-  and `filter.*.required` is set false through separate `GIT_CONFIG_KEY_n` / `VALUE_n` pairs.
-  System and global configuration are treated as trusted user configuration and stay active
-  (for example git-lfs), which keeps dirty state accurate. Values containing newlines or keys
-  containing `=` cannot become extra command options. Enumeration errors and oversized
-  inventories stop status rather than proceeding unprotected.
-- Status disables recursive submodule inspection. Discovered submodules are checked separately
-  with their own configuration policy; untracked files are included in dirty state.
-- Every read-only `show`/`log` disables text conversion and external diff. Read subprocesses set
-  `GIT_NO_LAZY_FETCH=1` and an empty `GIT_ALLOW_PROTOCOL`; all Git transports are denied even
-  when a repository sets a protocol to `always`. Missing partial-clone objects cause an error
-  instead of implicit network access. Users must explicitly fetch or retrieve missing objects.
-- Authentication is delegated to DSH's exact-route registry. The plugin checks canonical
-  worktree, Git directory, common directory and object-directory roots against registered
-  workspaces, rejects object alternates, and pins Git's worktree and metadata directory on
-  each call. A linked worktree outside its main repository is supported when the main repository
-  is also registered. Invalid `.git` entries never fall back to an ancestor repository.
-- Discovery streams entries and bounds visited directories/entries, depth and repositories.
-  Cancellation and deadlines cover discovery and root validation. Root validation and state
-  reads use bounded workers; a shared request cap prevents unlimited concurrent scans.
-  Per-process output is bounded, displayed log fields are truncated, and retained state commits
-  have an aggregate byte budget as well as a count limit. State cache entries are copied away
-  from Git stdout backing strings and share a total cache byte cap. Commit details have a response byte
-  limit and a byte-bounded cache; identity text is bounded and file lists are truncated at whole
-  entries, never by rewriting a path.
-- The fetch route disables the `ext::` transport and submodule recursion, and runs git with a
-  restricted environment: only the variables git needs for credentials and system operation
-  are passed through, so unrelated host-process secrets (for example DSH API keys) are not
-  inherited. Configuration-injection variables (`GIT_CONFIG_COUNT`, `GIT_CONFIG_PARAMETERS`,
-  `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n`) are not inherited either.
+Trusted system/global filters can still execute with the Host user's permissions. Disabling Git transports is not a network sandbox for those trusted programs.
 
-What it cannot do:
+## Workspace boundaries
 
-- This is not an OS sandbox for Git. Filesystem permissions, concurrent local metadata changes,
-  trusted user/system configuration includes and filesystem/network mounts remain properties
-  of the host. Registered workspaces and administrative storage must be chosen deliberately.
-- DSH 0.2.1 authentication, browser-origin/CSRF enforcement, request-body limits and caller
-  isolation are host contracts outside this repository. Local route tests do not certify those
-  contracts or the installed desktop runtime.
-- It cannot neutralise a repository's `core.sshCommand` or `credential.helper` and still fetch
-  from private remotes with your existing credentials. **Fetch therefore runs `git fetch`
-  inside every repository it discovers in your workspace, and git may run programs configured
-  by those repositories** (for example `core.sshCommand`, `credential.helper`,
-  `remote.*.uploadpack`). Only click **Fetch** in workspaces whose repositories you trust, or
-  keep untrusted repositories out of DSH workspaces.
+Every route checks that the worktree is inside a registered workspace. Git calls also check the canonical Git directory, common directory and object-directory roots, then pass explicit `--git-dir` and `--work-tree` arguments.
 
-## Scope
+Linked worktrees are allowed when their main repository is also inside a registered workspace. Non-empty object alternates are rejected. Invalid `.git` entries cannot fall back to a parent repository.
 
-In scope: plugin routes, path validation, command construction, parsing of git output, client-side
-rendering of repository data, and denial of service through workspace topology.
+These checks are not an OS filesystem sandbox. Trusted configuration includes, nested symlinks, filesystem/network mounts and concurrent local metadata changes remain subject to host permissions. Register workspaces and administrative storage deliberately.
 
-Out of scope: vulnerabilities in DSH itself, in git, or in repositories you place in a workspace;
-reports that require an attacker to already control the DSH process, its profile, or the user's git
-configuration.
+## Fetch
+
+Fetch runs `git fetch --all --prune` in the discovered repositories, with submodule recursion and `ext::` transport disabled. The view asks for confirmation when repositories are known.
+
+Fetch keeps the user's SSH and credential setup, including repository settings such as `core.sshCommand`, `credential.helper` and `remote.*.uploadpack`. **Only fetch repositories you trust.** Programs selected by these settings run under the Host user's OS account.
+
+The subprocess environment is restricted to system and Git credential/transport variables. Unrelated Host secrets and environment-based Git configuration injection variables are not inherited.
+
+The plugin does not commit, push, merge, or update working-tree files. Fetch can update objects, remote-tracking refs and `FETCH_HEAD`.
+
+## Resource limits
+
+Directory discovery streams entries and has depth, directory, entry and repository limits. Cancellation and deadlines cover traversal, root validation and Git requests; worker and request concurrency are bounded.
+
+Git output and individual responses have size limits. Aggregate history and caches have both count and byte limits, with copied strings to avoid retaining large output buffers through small slices. File lists are truncated at whole entries; a path is never shortened into a different path. Dirty state includes untracked files, and failed status reads are shown as unknown.
+
+## Scope and validation limits
+
+In scope: plugin routes, workspace/path checks, Git command construction, Git output parsing, client rendering, and resource use caused by workspace topology.
+
+Vulnerabilities in DSH, Git, or another project itself are outside this plugin's scope. Reports requiring control of the DSH process, its profile, or trusted user Git configuration are also outside scope.
+
+DSH authentication, browser-origin/CSRF enforcement, request-body limits and caller isolation are Host contracts outside this repository. The local route tests do not certify those contracts or the installed desktop runtime.
