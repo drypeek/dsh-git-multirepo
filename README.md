@@ -4,7 +4,7 @@ View commits from several Git repositories together in DSH.
 
 English · [简体中文](https://github.com/drypeek/dsh-git-multirepo/blob/main/README-zh.md)
 
-If a workspace contains separate frontend, backend, or tooling repositories, the **Repositories** tab shows their commits in one timeline. Each commit is labelled with its repository.
+If a workspace contains separate frontend, backend, or tooling repositories, the **Git log** tab shows their commits in one timeline. Each commit is labelled with its repository.
 
 This is a third-party plugin for DeepSeek Harness (DSH), with no affiliation to DeepSeek.
 
@@ -34,7 +34,7 @@ Install from npm ([dsh-git-multirepo](https://www.npmjs.com/package/dsh-git-mult
 dsh plugin --profile <profile> add dsh-git-multirepo
 ```
 
-Installation enables the bundle by default; re-enable it on the Plugins page if you previously switched it off. Restart the desktop app after installing or updating; for the Web GUI, refresh the page. The **Repositories** tab then appears beside **Chat** and **Trajectory** in a session.
+Installation enables the bundle by default; re-enable it on the Plugins page if you previously switched it off. Restart the desktop app after installing or updating; for the Web GUI, refresh the page. The **Git log** tab then appears beside **Chat** and **Trajectory** in a session.
 
 Other install targets:
 
@@ -50,7 +50,7 @@ Other install targets:
 
 ## Usage
 
-Open **Repositories** to scan the current session's working directory. Switching sessions changes the directory shown.
+Open **Git log** to scan the current session's working directory. Switching sessions changes the directory shown.
 
 Click a commit to expand its details, then click a filename to open its diff. Repository labels control which repositories appear; use search and the date filter to narrow the list.
 
