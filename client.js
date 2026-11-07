@@ -32,8 +32,8 @@ window.__ModuleLoader__.load({
 
     /** 中文文案。 */
     const zh = {
-      'view.label': '多仓库日志',
-      title: '多仓库日志',
+      'view.label': 'GIT日志',
+      title: '多仓库 Git 提交日志',
       'action.refresh': '刷新',
       'action.fetch': '拉取',
       'action.fetching': '拉取中…',
@@ -135,8 +135,8 @@ window.__ModuleLoader__.load({
 
     /** 英文文案。 */
     const en = {
-      'view.label': 'Repositories',
-      title: 'Repositories',
+      'view.label': 'Git log',
+      title: 'Multi-repo Git commit log',
       'action.refresh': 'Refresh',
       'action.fetch': 'Fetch',
       'action.fetching': 'Fetching…',
@@ -345,7 +345,7 @@ window.__ModuleLoader__.load({
 .gm-confirm-error .gm-confirm-text{color:var(--dsw-alias-state-error-primary)}
 .gm-retry{margin-left:10px;font:inherit;font-size:11px;padding:1px 8px;border-radius:3px;border:.5px solid var(--dsw-alias-border-l1);background:0 0;color:var(--dsw-alias-brand-primary);cursor:pointer}
 .gm-retry:hover{border-color:var(--dsw-alias-brand-primary)}
-/* The Repositories tab is a full-surface inspection view: while it is mounted the
+/* The Git log tab is a full-surface inspection view: while it is mounted the
    conversation composer is hidden so the timeline can use the whole height. The
    style tag lives inside this view, so it disappears when the user switches back
    to Chat or Trajectory. :has() keeps the rules scoped to the conversation that

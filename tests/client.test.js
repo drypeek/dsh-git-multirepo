@@ -428,7 +428,7 @@ test('repository status errors do not render as all clean', async () => {
   renderer.unmount()
 })
 
-test('repositories view hides the conversation composer while mounted', async () => {
+test('git log view hides the conversation composer while mounted', async () => {
   const requests = []
   const client = loadClient(requestFetch(requests))
   const renderer = new HookRenderer(client.view, null)
