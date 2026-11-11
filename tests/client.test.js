@@ -5,6 +5,9 @@ import vm from 'node:vm'
 
 const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
 
+const VIEW_MODE_STORAGE_KEY = 'dsh-git-multirepo:view-mode:v1'
+const TAB_PARAMS_STORAGE_KEY = 'dsh-git-multirepo:tab-params:v1'
+
 function sameDeps(left, right) {
   if (left === undefined || right === undefined) return false
   if (left.length !== right.length) return false
@@ -187,6 +190,8 @@ function detailValue(hash, subject = 'DETAIL') {
 function loadClient(fetchImpl, localStorage = new Map()) {
   const React = fakeReact()
   const registrations = new Map()
+  const openedTabs = []
+  const dictionaries = new Map()
   const storage = {
     getItem(key) {
       return localStorage.has(key) ? localStorage.get(key) : null
@@ -224,10 +229,17 @@ function loadClient(fetchImpl, localStorage = new Map()) {
     },
     locale: {
       bind: () => translate,
-      register: () => undefined,
+      register: (namespace, value) => {
+        dictionaries.set(namespace, value)
+        return undefined
+      },
     },
     sidebarRightTabs: { register: () => undefined },
-    sidebarRight: { openTab: () => undefined },
+    sidebarRight: {
+      openTab: (kind, payload) => {
+        openedTabs.push({ kind, payload })
+      },
+    },
     slots: {
       inject(_name, start) {
         return start()
@@ -244,6 +256,8 @@ function loadClient(fetchImpl, localStorage = new Map()) {
     title: registrations.get('sidebar.right.pane.tab.title'),
     diff: registrations.get('sidebar.right.pane.tab'),
     storage,
+    openedTabs,
+    dictionaries,
   }
 }
 
@@ -257,14 +271,28 @@ function requestFetch(requests) {
   return (url, options = {}) => {
     const parsed = new URL(url, 'http://localhost')
     const pathname = parsed.pathname
-    const kind = pathname.endsWith('/state') ? 'state' : pathname.endsWith('/commit') ? 'commit' : pathname.endsWith('/fetch') ? 'fetch' : 'other'
+    const kind = pathname.endsWith('/state')
+      ? 'state'
+      : pathname.endsWith('/commit')
+        ? 'commit'
+        : pathname.endsWith('/fetch')
+          ? 'fetch'
+          : pathname.endsWith('/worktree-diff')
+            ? 'worktree-diff'
+            : pathname.endsWith('/worktree')
+              ? 'worktree'
+              : 'other'
     const root = parsed.searchParams.get('root') ?? parsed.searchParams.get('repo') ?? ''
-    const request = { kind, root, options, settled: false }
+    const request = { kind, root, options, url: parsed, settled: false }
     requests.push(request)
     return new Promise((resolve, reject) => {
       request.resolve = (value) => {
         request.settled = true
         resolve(response(value))
+      }
+      request.respond = (value, status = 200) => {
+        request.settled = true
+        resolve(response(value, status))
       }
       request.reject = (error) => {
         request.settled = true
@@ -278,6 +306,61 @@ function viewProps(renderer) {
   return {
     sessionId: 'session',
     useSessions: (select) => select({ byId: { session: { cwd: renderer.cwd } } }),
+  }
+}
+
+function clickMode(renderer, mode) {
+  const button = findOne(renderer.tree, (node) => node.type === 'button' && node.props?.['data-gm-mode'] === mode)
+  assert.ok(button, `missing ${mode} mode button`)
+  button.props.onClick()
+  return button
+}
+
+/** 构造一个符合 host /worktree 契约的仓库条目。 */
+function worktreeRepo(root, overrides = {}) {
+  return {
+    name: 'repo',
+    path: `${root}/repo`,
+    branch: 'main',
+    upstream: null,
+    unborn: false,
+    error: null,
+    staged: [],
+    unstaged: [],
+    untracked: [],
+    conflicted: [],
+    totals: { insertions: 0, deletions: 0 },
+    filesTruncated: false,
+    ...overrides,
+  }
+}
+
+/** 构造一个符合 host /worktree 契约的工作区改动响应。 */
+function worktreeValue(root, repos) {
+  const scopes = ['conflicted', 'staged', 'unstaged', 'untracked']
+  const fileCount = (repo) =>
+    scopes.reduce((sum, scope) => sum + (Array.isArray(repo[scope]) ? repo[scope].length : 0), 0)
+  let totalFiles = 0
+  let dirtyRepos = 0
+  let cleanRepos = 0
+  for (const repo of repos) {
+    const files = fileCount(repo)
+    totalFiles += files
+    if (typeof repo.error === 'string' && repo.error !== '') continue
+    if (files > 0) dirtyRepos += 1
+    else cleanRepos += 1
+  }
+  return {
+    root,
+    scannedAt: '2026-01-01T00:00:00Z',
+    totalRepos: repos.length,
+    dirtyRepos,
+    cleanRepos,
+    totalFiles,
+    truncated: false,
+    reposTruncated: false,
+    reposSkipped: 0,
+    repos,
   }
 }
 
@@ -456,4 +539,333 @@ test('truncated state is surfaced in the header', async () => {
   await renderer.flush()
   assert.match(textContent(renderer.tree), /state\.truncated/)
   renderer.unmount()
+})
+
+test('workspace changes mode loads worktree data and renders grouped files', async () => {
+  const requests = []
+  const client = loadClient(requestFetch(requests))
+  const renderer = new HookRenderer(client.view, null)
+  const cwd = 'C:/workspace-changes'
+  renderer.cwd = cwd
+  renderer.props = viewProps(renderer)
+  renderer.render()
+  deferredRequest(requests, 'state', cwd).resolve(stateValue(cwd, 'ONE', 'a'.repeat(40), { dirty: true }))
+  await renderer.flush()
+
+  const dirtyLink = findOne(renderer.tree, (node) => node.props?.['data-gm-dirty-link'] === 'true')
+  assert.ok(dirtyLink, 'history summary should link dirty repositories to changes mode')
+  dirtyLink.props.onClick()
+  await renderer.flush()
+
+  const worktree = deferredRequest(requests, 'worktree', cwd)
+  assert.equal(worktree.url.pathname, '/api/git-multirepo/worktree')
+  assert.equal(worktree.url.searchParams.get('root'), cwd)
+  assert.equal(client.storage.getItem(VIEW_MODE_STORAGE_KEY), 'changes')
+
+  worktree.resolve(worktreeValue(cwd, [worktreeRepo(cwd, {
+    upstream: { ahead: 2, behind: 1 },
+    staged: [{ path: 'src/staged.js', status: 'M', insertions: 3, deletions: 1, binary: false }],
+    unstaged: [{ path: 'src/live.js', status: 'M', insertions: 5, deletions: 2, binary: false }],
+    untracked: [{ path: 'docs/new.md', status: '?', directory: false }],
+    conflicted: [{ path: 'src/conflict.js', status: 'U' }],
+    totals: { insertions: 8, deletions: 3 },
+  })]))
+  await renderer.flush()
+
+  const root = findOne(renderer.tree, (node) => node.props?.className === 'gm-root')
+  assert.ok(root)
+  assert.equal(root.props['data-gm-mode'], 'changes')
+  assert.equal(root.props['data-gm-status'], 'ready')
+  assert.ok(findOne(renderer.tree, (node) => node.props?.['data-gm-wt-repo'] === 'repo'))
+
+  const text = textContent(renderer.tree)
+  const groupOrder = ['changes.conflicted', 'changes.staged', 'changes.unstaged', 'changes.untracked']
+    .map((key) => text.indexOf(key))
+  assert.ok(groupOrder.every((index) => index >= 0), 'all four change groups should render')
+  assert.deepEqual(
+    [...groupOrder].sort((left, right) => left - right),
+    groupOrder,
+    'groups should render conflicts, staged, unstaged, then untracked',
+  )
+  assert.match(text, /↑2/)
+  assert.match(text, /↓1/)
+  assert.match(text, /changes\.summary/)
+  assert.match(text, /changes\.repoSummary/)
+
+  const badge = findOne(renderer.tree, (node) => node.props?.className === 'gm-mode-badge')
+  assert.ok(badge, 'changes mode should show a changed-file badge')
+  assert.equal(textContent(badge), '4')
+
+  const search = findOne(renderer.tree, (node) => node.type === 'input')
+  assert.equal(search.props.placeholder, 'changes.filterPlaceholder')
+
+  assert.equal(
+    findOne(renderer.tree, (node) => node.type === 'button' && node.props?.title?.startsWith('action.fetchHint')),
+    undefined,
+    'history-only fetch tool should be hidden in changes mode',
+  )
+  renderer.unmount()
+})
+
+test('workspace changes request failures surface an error status', async () => {
+  const requests = []
+  const client = loadClient(requestFetch(requests))
+  const renderer = new HookRenderer(client.view, null)
+  const cwd = 'C:/workspace-changes-error'
+  renderer.cwd = cwd
+  renderer.props = viewProps(renderer)
+  renderer.render()
+  clickMode(renderer, 'changes')
+  await renderer.flush()
+
+  deferredRequest(requests, 'worktree', cwd).respond({ error: 'request-failed' }, 500)
+  await renderer.flush()
+
+  assert.match(textContent(renderer.tree), /changes\.error/)
+  const root = findOne(renderer.tree, (node) => node.props?.className === 'gm-root')
+  assert.equal(root.props['data-gm-status'], 'error')
+  renderer.unmount()
+})
+
+test('workspace change rows open scoped diffs and disable unsupported rows', async () => {
+  const requests = []
+  const client = loadClient(requestFetch(requests))
+  const renderer = new HookRenderer(client.view, null)
+  const cwd = 'C:/workspace-change-rows'
+  renderer.cwd = cwd
+  renderer.props = viewProps(renderer)
+  renderer.render()
+  clickMode(renderer, 'changes')
+  await renderer.flush()
+
+  deferredRequest(requests, 'worktree', cwd).resolve(worktreeValue(cwd, [worktreeRepo(cwd, {
+    unstaged: [{ path: 'src/live.js', status: 'M', insertions: 5, deletions: 2, binary: false }],
+    untracked: [{ path: 'docs/', status: '?', directory: true }],
+    conflicted: [{ path: 'src/conflict.js', status: 'U' }],
+  })]))
+  await renderer.flush()
+
+  const row = findOne(
+    renderer.tree,
+    (node) => node.props?.['data-gm-wt-file'] === 'src/live.js' && node.props?.['data-gm-wt-scope'] === 'unstaged',
+  )
+  assert.ok(row, 'unstaged file row should render')
+  assert.equal(row.props.role, 'button')
+  row.props.onClick()
+  const opened = client.openedTabs[client.openedTabs.length - 1]
+  assert.equal(opened.kind, 'git-diff')
+  assert.equal(opened.payload.params.repo, `${cwd}/repo`)
+  assert.equal(opened.payload.params.scope, 'unstaged')
+  assert.equal(opened.payload.params.file, 'src/live.js')
+  assert.deepEqual(Object.keys(opened.payload.params).sort(), ['file', 'repo', 'scope'])
+  row.props.onKeyDown({ key: 'Enter', preventDefault: () => undefined })
+  assert.equal(client.openedTabs.length, 2, 'file rows should also open with the keyboard')
+
+  const conflict = findOne(
+    renderer.tree,
+    (node) => node.props?.['data-gm-wt-file'] === 'src/conflict.js' && node.props?.['data-gm-wt-scope'] === 'conflicted',
+  )
+  assert.ok(conflict)
+  assert.equal(conflict.props['aria-disabled'], true)
+  assert.equal(conflict.props.onClick, undefined)
+
+  const directory = findOne(renderer.tree, (node) => node.props?.['data-gm-wt-file'] === 'docs/')
+  assert.ok(directory)
+  assert.equal(directory.props['aria-disabled'], true)
+  assert.equal(directory.props.onClick, undefined)
+  assert.equal(directory.props.title, 'changes.directory')
+  renderer.unmount()
+})
+
+test('restored worktree diff tabs use the worktree diff route and scope badge', async () => {
+  for (const scenario of [
+    { scope: 'unstaged', deletions: 2, expectDeletions: true },
+    { scope: 'untracked', deletions: 4, expectDeletions: false },
+  ]) {
+    const storage = new Map([[TAB_PARAMS_STORAGE_KEY, JSON.stringify({
+      tab1: { repo: 'C:/workspace/repo', scope: scenario.scope, file: 'src/live.js' },
+    })]])
+    const requests = []
+    const client = loadClient(requestFetch(requests), storage)
+    const props = { useTabInfo: () => ({ tab: { contentId: 'tab1', navigation: {} } }) }
+    assert.equal(textContent(client.title(props)), 'live.js')
+    const renderer = new HookRenderer(client.diff, props)
+    renderer.render()
+
+    const diffRequest = deferredRequest(requests, 'worktree-diff', 'C:/workspace/repo')
+    assert.equal(diffRequest.url.pathname, '/api/git-multirepo/worktree-diff')
+    assert.equal(diffRequest.url.searchParams.get('repo'), 'C:/workspace/repo')
+    assert.equal(diffRequest.url.searchParams.get('scope'), scenario.scope)
+    assert.equal(diffRequest.url.searchParams.get('file'), 'src/live.js')
+    assert.equal(diffRequest.url.searchParams.get('hash'), null)
+    diffRequest.resolve({
+      file: 'src/live.js',
+      additions: 4,
+      deletions: scenario.deletions,
+      hunks: [{
+        header: '@@ -1,2 +1,3 @@',
+        lines: [
+          { type: 'context', text: ' same line' },
+          { type: 'add', text: '+added line' },
+          { type: 'del', text: '-removed line' },
+        ],
+      }],
+      binary: false,
+    })
+    await renderer.flush()
+
+    const text = textContent(renderer.tree)
+    assert.match(text, /@@ -1,2 \+1,3 @@/)
+    assert.match(text, /\+added line/)
+    assert.match(text, new RegExp(`changes\\.${scenario.scope}`))
+    assert.equal(
+      findOne(renderer.tree, (node) => node.props?.className === 'gd-del') !== undefined,
+      scenario.expectDeletions,
+    )
+    assert.doesNotMatch(text, /diff\.missingParams/)
+    renderer.unmount()
+  }
+
+  const oldStorage = new Map([[TAB_PARAMS_STORAGE_KEY, JSON.stringify({
+    tab2: { repo: 'C:/workspace/repo', hash: 'a'.repeat(40), file: 'src/old.js' },
+  })]])
+  const oldRequests = []
+  const oldClient = loadClient(requestFetch(oldRequests), oldStorage)
+  const oldProps = { useTabInfo: () => ({ tab: { contentId: 'tab2', navigation: {} } }) }
+  const oldRenderer = new HookRenderer(oldClient.diff, oldProps)
+  oldRenderer.render()
+  const patch = deferredRequest(oldRequests, 'other', 'C:/workspace/repo')
+  assert.equal(patch.url.pathname, '/api/git-multirepo/patch')
+  assert.equal(patch.url.searchParams.get('hash'), 'a'.repeat(40))
+  assert.equal(patch.url.searchParams.get('scope'), null)
+  patch.resolve({ file: 'src/old.js', additions: 1, deletions: 1, hunks: [], binary: false })
+  await oldRenderer.flush()
+  assert.doesNotMatch(textContent(oldRenderer.tree), /diff\.missingParams/)
+  oldRenderer.unmount()
+})
+
+test('worktree diff notices cover binary, too large and symbolic link payloads', async () => {
+  for (const scenario of [
+    { payload: { binary: true }, notice: 'changes\\.binary' },
+    { payload: { tooLarge: true }, notice: 'changes\\.tooLarge' },
+    { payload: { symbolicLink: true }, notice: 'changes\\.symbolicLink' },
+  ]) {
+    const storage = new Map([[TAB_PARAMS_STORAGE_KEY, JSON.stringify({
+      tab1: { repo: 'C:/workspace/repo', scope: 'staged', file: 'bin.dat' },
+    })]])
+    const requests = []
+    const client = loadClient(requestFetch(requests), storage)
+    const props = { useTabInfo: () => ({ tab: { contentId: 'tab1', navigation: {} } }) }
+    const renderer = new HookRenderer(client.diff, props)
+    renderer.render()
+    deferredRequest(requests, 'worktree-diff', 'C:/workspace/repo').resolve({
+      file: 'bin.dat',
+      additions: 0,
+      deletions: 0,
+      hunks: [],
+      binary: false,
+      ...scenario.payload,
+    })
+    await renderer.flush()
+    assert.match(textContent(renderer.tree), new RegExp(scenario.notice))
+    renderer.unmount()
+  }
+})
+
+test('changing workspace drops in-flight workspace changes responses', async () => {
+  const requests = []
+  const client = loadClient(requestFetch(requests))
+  const renderer = new HookRenderer(client.view, null)
+  renderer.cwd = 'C:/changes-a'
+  renderer.props = viewProps(renderer)
+  renderer.render()
+  clickMode(renderer, 'changes')
+  await renderer.flush()
+  const oldRequest = deferredRequest(requests, 'worktree', 'C:/changes-a')
+
+  renderer.cwd = 'C:/changes-b'
+  renderer.props = viewProps(renderer)
+  renderer.render()
+  await renderer.flush()
+  assert.equal(
+    oldRequest.options.signal.aborted,
+    true,
+    'changing workspace must abort the previous workspace changes request',
+  )
+  const newRequest = deferredRequest(requests, 'worktree', 'C:/changes-b')
+
+  oldRequest.resolve(worktreeValue('C:/changes-a', [worktreeRepo('C:/changes-a', {
+    unstaged: [{ path: 'OLD.js', status: 'M', insertions: 1, deletions: 0, binary: false }],
+  })]))
+  await renderer.flush()
+  assert.doesNotMatch(textContent(renderer.tree), /OLD\.js/)
+
+  newRequest.resolve(worktreeValue('C:/changes-b', [worktreeRepo('C:/changes-b', {
+    unstaged: [{ path: 'NEW.js', status: 'M', insertions: 1, deletions: 0, binary: false }],
+  })]))
+  await renderer.flush()
+  assert.match(textContent(renderer.tree), /NEW\.js/)
+  renderer.unmount()
+})
+
+test('view mode restores from local storage with invalid values falling back to history', async () => {
+  for (const [stored, expected] of [['bogus', 'history'], ['changes', 'changes']]) {
+    const requests = []
+    const client = loadClient(requestFetch(requests), new Map([[VIEW_MODE_STORAGE_KEY, stored]]))
+    const renderer = new HookRenderer(client.view, null)
+    renderer.cwd = `C:/mode-${expected}`
+    renderer.props = viewProps(renderer)
+    renderer.render()
+    const root = findOne(renderer.tree, (node) => node.props?.className === 'gm-root')
+    assert.equal(root.props['data-gm-mode'], expected)
+    if (expected === 'changes') {
+      deferredRequest(requests, 'worktree', renderer.cwd).resolve(worktreeValue(renderer.cwd, []))
+      await renderer.flush()
+      assert.match(textContent(renderer.tree), /changes\.empty/)
+    } else {
+      deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'ONE', 'b'.repeat(40)))
+      await renderer.flush()
+    }
+    renderer.unmount()
+  }
+})
+
+test('zh and en dictionaries expose identical keys', () => {
+  const client = loadClient(requestFetch([]))
+  const dictionaries = [...client.dictionaries.values()][0]
+  assert.ok(dictionaries, 'the client should register its dictionaries')
+  const zhKeys = Object.keys(dictionaries.zh).sort()
+  const enKeys = Object.keys(dictionaries.en).sort()
+  assert.deepEqual(zhKeys, enKeys, 'zh and en dictionaries must have the same keys')
+  for (const key of zhKeys) {
+    assert.equal(typeof dictionaries.zh[key], 'string', `zh.${key} should be a string`)
+    assert.equal(typeof dictionaries.en[key], 'string', `en.${key} should be a string`)
+    assert.notEqual(dictionaries.zh[key].trim(), '', `zh.${key} should not be empty`)
+    assert.notEqual(dictionaries.en[key].trim(), '', `en.${key} should not be empty`)
+  }
+  const required = [
+    'mode.history',
+    'mode.changes',
+    'changes.filterPlaceholder',
+    'changes.empty',
+    'changes.cleanCount',
+    'changes.staged',
+    'changes.unstaged',
+    'changes.untracked',
+    'changes.conflicted',
+    'changes.binary',
+    'changes.tooLarge',
+    'changes.symbolicLink',
+    'changes.directory',
+    'changes.conflictUnsupported',
+    'changes.loading',
+    'changes.error',
+    'changes.truncated',
+    'changes.summary',
+    'changes.repoSummary',
+    'changes.openDiff',
+    'changes.noMatch',
+    'changes.refreshHint',
+  ]
+  for (const key of required) assert.ok(zhKeys.includes(key), `missing i18n key: ${key}`)
 })
