@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # create the GitHub Release
+  id-token: write # npm provenance / Trusted Publishing
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Check tag matches package.json
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$version" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package.json version $version." >&2
+            exit 1
+          fi
+
+      - name: Syntax check
+        run: |
+          node --check index.js
+          node --check client.js
+
+      - name: Test
+        run: node --test tests/host.test.js tests/client.test.js
+
+      - name: Publish
+        env:
+          # Option A: repository secret with an npm publish token.
+          # Option B: configure npm Trusted Publishing for this repository, then
+          # delete the NODE_AUTH_TOKEN line below and keep the id-token permission.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          case "$GITHUB_REF_NAME" in
+            *-*) dist_tag=next ;; # e.g. v0.3.0-rc.1 — pre-release channel
+            *)   dist_tag=latest ;;
+          esac
+          echo "Publishing $GITHUB_REF_NAME with dist-tag $dist_tag"
+          npm publish --provenance --tag "$dist_tag"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag
