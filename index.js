@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { accessSync, constants as fsConstants, existsSync, realpathSync, statSync, readFileSync } from 'node:fs'
+import { accessSync, constants as fsConstants, existsSync, lstatSync, realpathSync, statSync, readFileSync } from 'node:fs'
 import { opendir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -12,6 +12,10 @@ const ROUTE_COMMIT = '/api/git-multirepo/commit'
 const ROUTE_FETCH = '/api/git-multirepo/fetch'
 /** 单个文件的差异路由。 */
 const ROUTE_PATCH = '/api/git-multirepo/patch'
+/** 工作区未提交改动列表路由。 */
+const ROUTE_WORKTREE = '/api/git-multirepo/worktree'
+/** 未提交单个文件的差异路由。 */
+const ROUTE_WORKTREE_DIFF = '/api/git-multirepo/worktree-diff'
 /**
  * git 输出字段分隔符，由格式串里的 %x00 产生。
  * NUL 不会出现在提交对象、引用名或路径中，因此提交内容无法用它伪造字段或记录。
@@ -112,6 +116,16 @@ const LOG_FORMAT = '--pretty=format:%H%x00%h%x00%an%x00%aI%x00%s%x00%D%x00%S%x00
 const PATCH_LINE_LIMIT = 5000
 /** 差异中单行的最大字符数。 */
 const PATCH_LINE_CHARS = 2000
+/** 工作区改动列表缓存有效期，与状态视图一致，便于在两个视图间切换时复用。 */
+const WORKTREE_CACHE_TTL = 2000
+/** 工作区改动列表缓存的条目上限。 */
+const WORKTREE_CACHE_LIMIT = 8
+/** 工作区改动列表响应与缓存的字节上限。 */
+const WORKTREE_CACHE_BYTE_LIMIT = 8 * 1024 * 1024
+/** 每个仓库最多返回的改动条目数，跨 conflicted/staged/unstaged/untracked 四组。 */
+const MAX_CHANGE_ENTRIES = 2000
+/** 未跟踪文件预览的最大读取字节数。 */
+const UNTRACKED_READ_LIMIT = 512 * 1024
 
 /** 工作区状态缓存，键为根目录加查询条件。 */
 const stateCache = new Map()
@@ -119,6 +133,8 @@ const stateCache = new Map()
 const commitCache = new Map()
 /** 进行中的 fetch，键为工作区根目录；同一工作区同时只允许一个。 */
 const fetchLocks = new Map()
+/** 工作区改动缓存，键为 `根目录|扫描深度`。 */
+const worktreeCache = new Map()
 
 export const inject = ['connection', 'workspaceRegistry']
 
@@ -182,6 +198,164 @@ function splitRecords(stdout, size) {
     records.push(fields)
   }
   return records
+}
+
+/**
+ * 校验请求里的单文件相对路径。
+ * 拒绝空值、NUL、绝对路径、`..` 段与目录尾斜杠；GIT_LITERAL_PATHSPECS
+ * 已关闭 pathspec magic，因此冒号、星号等字符只按字面匹配。
+ * @param {string} file 请求参数。
+ * @returns {string | null} 合法返回 null，否则返回错误码。
+ */
+function safeRelativePath(file) {
+  if (typeof file !== 'string' || file === '') return 'invalid-file'
+  if (file.includes('\u0000')) return 'invalid-file'
+  if (path.isAbsolute(file) || file.split(/[\\/]/).includes('..')) return 'invalid-file'
+  if (file.endsWith('/') || file.endsWith('\\')) return 'invalid-file'
+  return null
+}
+
+/**
+ * 解析 `git status --porcelain=v1 --branch` 的分支头行。
+ * 支持普通分支、带 ahead/behind 的 upstream、unborn HEAD 与 detached HEAD。
+ * @param {string} header `## ` 开头的头行。
+ * @returns {{ branch: string, upstream: { ahead: number, behind: number } | null, unborn: boolean }} 分支信息。
+ */
+function parseBranchHeader(header) {
+  const result = { branch: '', upstream: null, unborn: false }
+  if (typeof header !== 'string' || !header.startsWith('## ')) return result
+  const rest = header.slice(3).replace(/\r$/, '').trim()
+  const unbornMatch = /^(?:No commits yet|Initial commit) on (.+)$/.exec(rest)
+  if (unbornMatch !== null) {
+    result.branch = unbornMatch[1]
+    result.unborn = true
+    return result
+  }
+  const tracked = /^(.*?)\.\.\.(.*?)(?:\s\[(.*)\])?$/.exec(rest)
+  if (tracked !== null) {
+    result.branch = tracked[1]
+    const track = tracked[3] ?? ''
+    const ahead = /ahead (\d+)/.exec(track)
+    const behind = /behind (\d+)/.exec(track)
+    if (ahead !== null || behind !== null) {
+      result.upstream = {
+        ahead: ahead === null ? 0 : Number(ahead[1]),
+        behind: behind === null ? 0 : Number(behind[1]),
+      }
+    }
+    return result
+  }
+  // `## HEAD (no branch)`：detached HEAD。
+  if (rest !== '') result.branch = rest.startsWith('HEAD') ? 'HEAD' : rest
+  return result
+}
+
+/**
+ * 解析 `git status --porcelain=v1 -z --branch` 的 NUL 分隔输出。
+ * @param {string} stdout git 输出。
+ * @returns {{ header: string, entries: Array<{ x: string, y: string, path: string }> }} 头行与改动条目。
+ */
+function parseStatusV1Z(stdout) {
+  const records = typeof stdout === 'string' ? stdout.split(FIELD_SEP) : []
+  let header = ''
+  let index = 0
+  if (records.length > 0 && records[0].startsWith('## ')) {
+    header = records[0]
+    index = 1
+  }
+  const entries = []
+  for (; index < records.length; index += 1) {
+    const record = records[index]
+    // 每条记录形如 `XY<space><path>`；-z 输出不做 C 风格转义。
+    if (record.length < 4 || record[2] !== ' ') continue
+    entries.push({ x: record[0], y: record[1], path: record.slice(3) })
+  }
+  return { header, entries }
+}
+
+/**
+ * 解析 `git diff --numstat -z` 输出。
+ * 二进制文件的增删行数为 `-`，在这里规范为 null 并标记 binary。
+ * @param {string} stdout git 输出。
+ * @returns {Map<string, { insertions: number | null, deletions: number | null, binary: boolean }>} 按路径索引的行数。
+ */
+function parseNumstatZ(stdout) {
+  const counts = new Map()
+  if (typeof stdout !== 'string') return counts
+  for (const record of stdout.split(FIELD_SEP)) {
+    // 路径本身可能含 Tab，因此第三个分隔符之后的整段都算路径。
+    const match = /^(\d+|-)\t(\d+|-)\t([\s\S]+)$/.exec(record)
+    if (match === null) continue
+    counts.set(
+      match[3],
+      match[1] === '-'
+        ? { insertions: null, deletions: null, binary: true }
+        : { insertions: Number(match[1]), deletions: Number(match[2]), binary: false },
+    )
+  }
+  return counts
+}
+
+/**
+ * 解析 unified diff 输出（`git show` / `git diff`）。
+ * 提取二进制标记、hunk 与逐行标记；行数与单行长度都有上限。
+ * @param {string} raw git 原文。
+ * @returns {{ binary: boolean, truncated: boolean, additions: number, deletions: number, hunks: Array<{ header: string, lines: Array<{ type: string, text: string }> }> }} 解析结果。
+ */
+function parseUnifiedDiff(raw) {
+  const rawLines = (typeof raw === 'string' ? raw : '').split('\n')
+  const binary = rawLines.some(
+    (line) => line.startsWith('Binary files ') || line.startsWith('GIT binary patch'),
+  )
+  const hunks = []
+  let current = null
+  let additions = 0
+  let deletions = 0
+  let emitted = 0
+  let truncated = false
+
+  for (const rawLine of rawLines) {
+    if (emitted >= PATCH_LINE_LIMIT) {
+      truncated = true
+      break
+    }
+    // 只去掉行尾 CR；正文中间或行首的 CR 属于内容。
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine
+    if (line.startsWith('@@')) {
+      if (current !== null) hunks.push(current)
+      current = { header: line, lines: [] }
+      emitted += 1
+      continue
+    }
+    // hunk 之外只有 diff 头部/元信息（diff --git、index、---、+++、mode 等），全部跳过。
+    if (current === null || line === '') continue
+    // `\ No newline at end of file` 之类的标记行不渲染。
+    if (line.startsWith('\\')) continue
+
+    let type = 'context'
+    let text = line
+    if (line.startsWith('+')) {
+      type = 'add'
+      text = line.slice(1)
+      additions += 1
+    } else if (line.startsWith('-')) {
+      type = 'del'
+      text = line.slice(1)
+      deletions += 1
+    } else if (line.startsWith(' ')) {
+      text = line.slice(1)
+    } else {
+      // hunk 内无法识别的行按元信息跳过，避免误渲染成正文。
+      continue
+    }
+    current.lines.push({
+      type,
+      text: text.length > PATCH_LINE_CHARS ? `${text.slice(0, PATCH_LINE_CHARS)}…` : text,
+    })
+    emitted += 1
+  }
+  if (current !== null) hunks.push(current)
+  return { binary, truncated, additions, deletions, hunks }
 }
 
 /**
@@ -356,7 +530,9 @@ async function git(args, cwd, options = {}) {
   if (!(await supportsGit())) return { ok: false, code: 'unsupported-git-version', message: 'Git 2.36 or newer is required' }
   const storage = repositoryStorage(cwd, options.ctx)
   if (storage === null) return { ok: false, code: 'repository-boundary', message: 'repository-boundary: Git metadata must belong to registered workspaces; object alternates are not supported' }
-  const safeArgs = !options.network && ['log', 'show'].includes(args[0])
+  // 内容转换与外部 diff 都可能执行仓库本地配置的程序；日志、提交与工作区
+  // 差异都只读取 git 自己的输出。
+  const safeArgs = !options.network && ['log', 'show', 'diff'].includes(args[0])
     ? [args[0], '--no-textconv', '--no-ext-diff', ...args.slice(1)]
     : args
   return runGit([`--git-dir=${storage.gitDir}`, `--work-tree=${cwd}`, ...safeArgs], cwd, options)
@@ -581,6 +757,17 @@ async function discoverRepos(root, maxDepth, signal) {
 }
 
 /**
+ * 生成仓库在工作区内的展示名。
+ * @param {string} root 工作区根目录。
+ * @param {string} repo 仓库绝对路径。
+ * @returns {string} 相对根目录的路径（POSIX 分隔符）；仓库即根时用根目录名。
+ */
+function repoDisplayName(root, repo) {
+  const relative = path.relative(root, repo)
+  return relative === '' ? path.basename(root) : relative.split(path.sep).join('/')
+}
+
+/**
  * 读取单个仓库的分支、脏状态与提交列表。
  * @param {string} repo 仓库绝对路径。
  * @param {string} root 工作区根目录，用于生成展示名。
@@ -589,8 +776,7 @@ async function discoverRepos(root, maxDepth, signal) {
  * @param {AbortSignal} [signal] 请求取消信号。
  */
 async function readRepo(repo, root, limit, allBranches, signal, ctx) {
-  const relative = path.relative(root, repo)
-  const name = relative === '' ? path.basename(root) : relative.split(path.sep).join('/')
+  const name = repoDisplayName(root, repo)
 
   const logArgs = [
     'log',
@@ -771,6 +957,175 @@ async function collect(request) {
     truncated,
     reposTruncated: discovered.truncated,
     reposSkipped: verified.skipped.length,
+  }
+}
+
+/**
+ * 按固定优先级把四组改动裁剪到 MAX_CHANGE_ENTRIES 条以内。
+ * 冲突文件最需要被看到，因此优先保留；剩余预算依次给 staged、unstaged、untracked。
+ * @param {any} detail 仓库改动详情。
+ * @returns {boolean} 是否发生截断。
+ */
+function capChangeEntries(detail) {
+  let remaining = MAX_CHANGE_ENTRIES
+  let truncated = false
+  for (const group of [detail.conflicted, detail.staged, detail.unstaged, detail.untracked]) {
+    if (group.length <= remaining) {
+      remaining -= group.length
+      continue
+    }
+    group.length = remaining
+    remaining = 0
+    truncated = true
+  }
+  return truncated
+}
+
+/**
+ * 读取单个仓库的未提交改动。
+ * 只执行只读命令：先中和本地 filter/diff 配置，再取 status 与两份 numstat。
+ * @param {string} repo 仓库绝对路径。
+ * @param {string} root 工作区根目录，用于生成展示名。
+ * @param {AbortSignal} [signal] 请求取消信号。
+ * @param {any} ctx cordis 上下文。
+ * @returns {Promise<any>} 仓库改动详情。
+ */
+async function readWorktreeRepo(repo, root, signal, ctx) {
+  const detail = {
+    name: repoDisplayName(root, repo),
+    path: repo,
+    branch: '',
+    upstream: null,
+    unborn: false,
+    error: null,
+    staged: [],
+    unstaged: [],
+    untracked: [],
+    conflicted: [],
+    totals: { insertions: 0, deletions: 0 },
+    filesTruncated: false,
+  }
+
+  const neutralisers = await readOnlyConfigNeutralisers(repo, signal, ctx)
+  if (!neutralisers.ok) return { ...detail, error: neutralisers.message }
+  const options = { signal, ctx, config: neutralisers.config }
+  const [statusResult, stagedNumstat, unstagedNumstat] = await Promise.all([
+    git(
+      ['status', '--porcelain=v1', '-z', '--untracked-files=normal', '--ignore-submodules=all', '--no-renames', '--branch'],
+      repo,
+      options,
+    ),
+    git(['diff', '--cached', '--numstat', '-z', '--no-renames', '--ignore-submodules=all'], repo, options),
+    git(['diff', '--numstat', '-z', '--no-renames', '--ignore-submodules=all'], repo, options),
+  ])
+  // 状态是列表的主体；行数只是补充。单个命令失败时保留已经能解析出的部分。
+  if (!statusResult.ok) detail.error = statusResult.message.slice(0, 300)
+  else if (!stagedNumstat.ok) detail.error = stagedNumstat.message.slice(0, 300)
+  else if (!unstagedNumstat.ok) detail.error = unstagedNumstat.message.slice(0, 300)
+
+  const parsed = statusResult.ok ? parseStatusV1Z(statusResult.stdout) : { header: '', entries: [] }
+  const branch = parseBranchHeader(parsed.header)
+  detail.branch = branch.branch
+  detail.upstream = branch.upstream
+  detail.unborn = branch.unborn
+
+  const stagedCounts = stagedNumstat.ok ? parseNumstatZ(stagedNumstat.stdout) : new Map()
+  const unstagedCounts = unstagedNumstat.ok ? parseNumstatZ(unstagedNumstat.stdout) : new Map()
+  const countFor = (counts, file) => {
+    const count = counts.get(file)
+    if (count === undefined) return { insertions: 0, deletions: 0, binary: false }
+    return { insertions: count.insertions, deletions: count.deletions, binary: count.binary }
+  }
+
+  for (const entry of parsed.entries) {
+    const { x, y } = entry
+    if (x === '?' && y === '?') {
+      // 未跟踪目录由 git 折叠为一条 `dir/` 记录。
+      detail.untracked.push({ path: entry.path, status: '?', directory: entry.path.endsWith('/') })
+      continue
+    }
+    // --no-renames 下不会出现 R/C；UU/AA/DD 与任一侧为 U 的条目都算冲突。
+    if (x === 'U' || y === 'U' || (x === 'A' && y === 'A') || (x === 'D' && y === 'D')) {
+      detail.conflicted.push({ path: entry.path, status: 'U' })
+      continue
+    }
+    // 部分暂存的文件会同时出现在两组里，各自使用 X / Y 字符与对应的 numstat。
+    if (x !== ' ' && x !== '?') {
+      detail.staged.push({ path: entry.path, status: x, ...countFor(stagedCounts, entry.path) })
+    }
+    if (y !== ' ' && y !== '?') {
+      detail.unstaged.push({ path: entry.path, status: y, ...countFor(unstagedCounts, entry.path) })
+    }
+  }
+
+  for (const group of [detail.staged, detail.unstaged, detail.untracked, detail.conflicted]) {
+    group.sort((left, right) => left.path.localeCompare(right.path))
+  }
+  detail.filesTruncated = capChangeEntries(detail)
+  for (const group of [detail.staged, detail.unstaged]) {
+    for (const entry of group) {
+      if (typeof entry.insertions === 'number') detail.totals.insertions += entry.insertions
+      if (typeof entry.deletions === 'number') detail.totals.deletions += entry.deletions
+    }
+  }
+  return detail
+}
+
+/**
+ * 收集工作区内所有仓库的未提交改动。
+ * @param {{ root: string, maxDepth: number, signal: AbortSignal, ctx: any }} request 收集请求。
+ * @returns {Promise<any>} 工作区改动响应体。
+ */
+async function collectWorktree(request) {
+  const discovered = await discoverRepos(request.root, request.maxDepth, request.signal)
+  const verified = await filterRepoRoots(discovered.repos, request.ctx, request.signal)
+  const details = await boundedMap(
+    verified.repos,
+    (repo) => readWorktreeRepo(repo, request.root, request.signal, request.ctx),
+    request.signal,
+  )
+  const changed = details
+    .filter(
+      (detail) =>
+        detail.error !== null
+        || detail.staged.length > 0
+        || detail.unstaged.length > 0
+        || detail.untracked.length > 0
+        || detail.conflicted.length > 0,
+    )
+    .sort((left, right) => left.name.localeCompare(right.name))
+
+  let totalFiles = 0
+  for (const detail of changed) {
+    totalFiles += detail.staged.length + detail.unstaged.length + detail.untracked.length + detail.conflicted.length
+  }
+
+  // 响应体按仓库粒度截断，宁可少列尾部仓库，也不把单条记录从中间切开。
+  const byteBudget = WORKTREE_CACHE_BYTE_LIMIT - 16 * 1024
+  const repos = []
+  let bytes = 0
+  let truncated = false
+  for (const detail of changed) {
+    const size = Buffer.byteLength(JSON.stringify(detail))
+    if (bytes + size > byteBudget) {
+      truncated = true
+      break
+    }
+    bytes += size
+    repos.push(detail)
+  }
+
+  return {
+    root: request.root,
+    scannedAt: new Date().toISOString(),
+    totalRepos: details.length,
+    dirtyRepos: changed.length,
+    cleanRepos: details.length - changed.length,
+    totalFiles,
+    truncated,
+    reposTruncated: discovered.truncated,
+    reposSkipped: verified.skipped.length,
+    repos,
   }
 }
 
@@ -1115,19 +1470,15 @@ async function handlePatch(request, ctx) {
   if (!isInsideWorkspace(ctx, repo)) return jsonResponse(403, { error: 'outside-workspace', repo })
   if (!(await isGitRepoRoot(repo, ctx, request.signal))) return jsonResponse(400, { error: 'invalid-repo', repo })
   if (!REQUEST_HASH.test(hash)) return jsonResponse(400, { error: 'invalid-hash', hash })
-  if (file === '' || file.includes('\u0000')) return jsonResponse(400, { error: 'invalid-file', file })
-  // GIT_LITERAL_PATHSPECS disables magic, including a leading colon.
-  if (path.isAbsolute(file) || file.split(/[\\/]/).includes('..')) {
-    return jsonResponse(400, { error: 'invalid-file', file })
-  }
+  const fileError = safeRelativePath(file)
+  if (fileError !== null) return jsonResponse(400, { error: fileError, file })
 
   const result = await git(
     [
       'show',
       '--format=',
       '--no-color',
-      '--no-textconv',
-      '--no-ext-diff',
+      // --no-textconv / --no-ext-diff 由 git() 对 show 统一追加。
       '-U3',
       '-m',
       '--first-parent',
@@ -1143,59 +1494,198 @@ async function handlePatch(request, ctx) {
     return readFailure(result, 'patch-not-found')
   }
 
-  const rawLines = result.stdout.split('\n')
-  const binary = rawLines.some(
-    (line) => line.startsWith('Binary files ') || line.startsWith('GIT binary patch'),
+  return jsonResponse(200, { file, ...parseUnifiedDiff(result.stdout) })
+}
+
+/**
+ * 判断路径是否严格位于目录内部（不包含目录自身）。
+ * @param {string} base 目录绝对路径。
+ * @param {string} target 目标绝对路径。
+ * @returns {boolean} 是否在目录内部。
+ */
+function isInsideDirectory(base, target) {
+  const relative = path.relative(base, target)
+  return (
+    relative !== ''
+    && relative !== '..'
+    && !relative.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relative)
   )
+}
 
-  const hunks = []
-  let current = null
-  let additions = 0
-  let deletions = 0
-  let emitted = 0
+/**
+ * 为未跟踪文件本地合成 diff。
+ * 不走 `git diff --no-index`：退出码 1 会被误判为失败，且符号链接/编码
+ * 处理不可控。这里只读取文件内容并渲染成单 hunk。
+ * @param {string} repo 仓库绝对路径。
+ * @param {string} file 仓库内相对路径。
+ * @returns {Response} 查询响应。
+ */
+function readUntrackedPreview(repo, file) {
+  const target = path.join(repo, file)
+  let stats
+  try {
+    stats = lstatSync(target)
+  } catch {
+    return jsonResponse(404, { error: 'patch-not-found', file })
+  }
+  if (stats.isSymbolicLink()) {
+    return jsonResponse(200, {
+      file,
+      binary: false,
+      truncated: false,
+      additions: 0,
+      deletions: 0,
+      hunks: [],
+      symbolicLink: true,
+    })
+  }
+  if (!stats.isFile()) return jsonResponse(400, { error: 'invalid-file', file })
+  // 拒绝通过符号链接目录逃逸到仓库之外。
+  const real = canonicalPath(target)
+  if (real === null || !isInsideDirectory(repo, real)) {
+    return jsonResponse(404, { error: 'patch-not-found', file })
+  }
+  if (stats.size > UNTRACKED_READ_LIMIT) {
+    return jsonResponse(200, {
+      file,
+      binary: false,
+      truncated: true,
+      additions: 0,
+      deletions: 0,
+      hunks: [],
+      tooLarge: true,
+    })
+  }
+  let buffer
+  try {
+    buffer = readFileSync(real)
+  } catch {
+    return jsonResponse(404, { error: 'patch-not-found', file })
+  }
+  if (buffer.length > UNTRACKED_READ_LIMIT) {
+    return jsonResponse(200, {
+      file,
+      binary: false,
+      truncated: true,
+      additions: 0,
+      deletions: 0,
+      hunks: [],
+      tooLarge: true,
+    })
+  }
+  if (buffer.includes(0)) {
+    return jsonResponse(200, {
+      file,
+      binary: true,
+      truncated: false,
+      additions: 0,
+      deletions: 0,
+      hunks: [],
+    })
+  }
+
+  let text = buffer.toString('utf8')
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1)
+  const rawLines = text.split('\n')
+  // 末尾换行是行结束符而不是额外的一行空行。
+  if (rawLines.length > 0 && rawLines[rawLines.length - 1] === '') rawLines.pop()
+  const lines = []
   let truncated = false
-
-  for (const raw of rawLines) {
-    if (emitted >= PATCH_LINE_LIMIT) {
+  for (const rawLine of rawLines) {
+    if (lines.length >= PATCH_LINE_LIMIT) {
       truncated = true
       break
     }
-    if (raw.startsWith('@@')) {
-      if (current !== null) hunks.push(current)
-      current = { header: raw, lines: [] }
-      emitted += 1
-      continue
-    }
-    // hunk 之外的行只有 diff 头部/元信息（diff --git、index、---、+++、mode 等），全部跳过。
-    // 不能在 hunk 内按前缀丢弃：以 `--- ` / `+++ ` 开头的行是内容本身。
-    if (current === null || raw === '') continue
-    if (raw.startsWith('\\')) continue
-
-    let type = 'context'
-    let text = raw
-    if (raw.startsWith('+')) {
-      type = 'add'
-      text = raw.slice(1)
-      additions += 1
-    } else if (raw.startsWith('-')) {
-      type = 'del'
-      text = raw.slice(1)
-      deletions += 1
-    } else if (raw.startsWith(' ')) {
-      text = raw.slice(1)
-    } else {
-      // hunk 内出现无法识别的行：跳过，避免把它误渲染成正文。
-      continue
-    }
-    current.lines.push({
-      type,
-      text: text.length > PATCH_LINE_CHARS ? `${text.slice(0, PATCH_LINE_CHARS)}…` : text,
+    // Windows 换行按文本行渲染，不把 CR 带进正文。
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine
+    lines.push({
+      type: 'add',
+      text: line.length > PATCH_LINE_CHARS ? `${line.slice(0, PATCH_LINE_CHARS)}…` : line,
     })
-    emitted += 1
   }
-  if (current !== null) hunks.push(current)
+  return jsonResponse(200, {
+    file,
+    binary: false,
+    truncated,
+    additions: rawLines.length,
+    deletions: 0,
+    hunks: lines.length === 0 ? [] : [{ header: `@@ -0,0 +1,${rawLines.length} @@`, lines }],
+  })
+}
 
-  return jsonResponse(200, { file, binary, truncated, additions, deletions, hunks })
+/**
+ * 处理工作区改动列表请求。
+ * @param {Request} request 已鉴权请求。
+ * @param {any} ctx cordis 上下文。
+ */
+async function handleWorktree(request, ctx) {
+  const url = new URL(request.url)
+  const requested = url.searchParams.get('root')
+  const root = resolveWorkspaceRoot(requested)
+  if (root === null) return jsonResponse(400, { error: 'invalid-root', root: requested ?? '' })
+  if (!isInsideWorkspace(ctx, root)) return jsonResponse(403, { error: 'outside-workspace', root })
+
+  const maxDepth = Math.floor(
+    Math.min(Math.max(Number(url.searchParams.get('depth') ?? 4) || 4, 1), 10),
+  )
+  const cacheKey = `${root}|${maxDepth}`
+
+  pruneCache(worktreeCache, WORKTREE_CACHE_TTL)
+  const cached = worktreeCache.get(cacheKey)
+  if (cached !== undefined) return jsonResponse(200, cached.value)
+
+  const value = await collectWorktree({ root, maxDepth, signal: request.signal, ctx })
+  if (!request.signal.aborted) {
+    setBoundedCache(worktreeCache, cacheKey, value, WORKTREE_CACHE_LIMIT, WORKTREE_CACHE_BYTE_LIMIT)
+  }
+  return jsonResponse(200, value)
+}
+
+/**
+ * 处理单文件工作区差异请求。
+ * @param {Request} request 已鉴权请求。
+ * @param {any} ctx cordis 上下文。
+ */
+async function handleWorktreeDiff(request, ctx) {
+  const url = new URL(request.url)
+  const requested = url.searchParams.get('repo')
+  const repo = resolveWorkspaceRoot(requested)
+  const scope = url.searchParams.get('scope') ?? ''
+  const file = url.searchParams.get('file') ?? ''
+
+  if (repo === null) return jsonResponse(400, { error: 'invalid-repo', repo: requested ?? '' })
+  if (!isInsideWorkspace(ctx, repo)) return jsonResponse(403, { error: 'outside-workspace', repo })
+  if (scope !== 'staged' && scope !== 'unstaged' && scope !== 'untracked') {
+    return jsonResponse(400, { error: 'invalid-scope', scope })
+  }
+  const fileError = safeRelativePath(file)
+  if (fileError !== null) return jsonResponse(400, { error: fileError, file })
+  if (!(await isGitRepoRoot(repo, ctx, request.signal))) {
+    return jsonResponse(400, { error: 'invalid-repo', repo })
+  }
+
+  // 差异输出同样可能触发仓库本地的 filter/textconv；先中和再执行。
+  const neutralisers = await readOnlyConfigNeutralisers(repo, request.signal, ctx)
+  if (!neutralisers.ok) return readFailure(neutralisers, 'unsafe-config')
+  if (scope === 'untracked') return readUntrackedPreview(repo, file)
+
+  const result = await git(
+    [
+      'diff',
+      ...(scope === 'staged' ? ['--cached'] : []),
+      '-U3',
+      '--no-color',
+      '--no-renames',
+      '--ignore-submodules=all',
+      '--',
+      file,
+    ],
+    repo,
+    { signal: request.signal, ctx, config: neutralisers.config },
+  )
+  if (!result.ok) return readFailure(result, 'patch-not-found')
+  return jsonResponse(200, { scope, file, ...parseUnifiedDiff(result.stdout) })
 }
 
 /**
@@ -1242,5 +1732,25 @@ export function apply(ctx) {
         fetch: (request) => runRequest(request, ctx, handlePatch),
       }),
     'git-multirepo: patch route',
+  )
+  ctx.effect(
+    () =>
+      ctx.connection.fetch.register({
+        path: ROUTE_WORKTREE,
+        methods: ['GET'],
+        requestBody: 'buffered',
+        fetch: (request) => runRequest(request, ctx, handleWorktree),
+      }),
+    'git-multirepo: worktree route',
+  )
+  ctx.effect(
+    () =>
+      ctx.connection.fetch.register({
+        path: ROUTE_WORKTREE_DIFF,
+        methods: ['GET'],
+        requestBody: 'buffered',
+        fetch: (request) => runRequest(request, ctx, handleWorktreeDiff),
+      }),
+    'git-multirepo: worktree diff route',
   )
 }
