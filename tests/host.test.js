@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test, after } from 'node:test'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, unlinkSync, rmSync, chmodSync, copyFileSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, unlinkSync, rmSync, chmodSync, copyFileSync, symlinkSync, realpathSync } from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import vm from 'node:vm'
@@ -650,4 +650,36 @@ test('worktree handles spaces, unicode and bracket filenames with literal pathsp
     assert.equal(diff.data.additions, 1, name)
     assert.deepEqual(diff.data.hunks[0].lines, [{ type: 'add', text: 'x' }])
   }
+})
+
+test('workspace roots using Windows 8.3 short paths resolve like Git long paths', async () => {
+  if (process.platform !== 'win32') return
+  const longContainer = path.join(root, 'short-path-alias-container')
+  mkdirSync(longContainer)
+  // 只有启用了 8.3 别名的卷才能构造出短路径；没有别名时跳过该回归。
+  let shortContainer = ''
+  try {
+    const script = `(New-Object -ComObject Scripting.FileSystemObject).GetFolder(${JSON.stringify(longContainer)}).ShortPath`
+    const probe = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf8',
+      windowsHide: true,
+    }).trim()
+    if (probe !== '' && !probe.startsWith('"') && probe.toLowerCase() !== longContainer.toLowerCase()) {
+      shortContainer = probe
+    }
+  } catch {
+    shortContainer = ''
+  }
+  if (shortContainer === '') return
+
+  const repo = fixtureAt(path.join(shortContainer, 'repo'))
+  const call = host([shortContainer])
+  const state = await call('state', { root: shortContainer })
+  assert.equal(state.status, 200)
+  assert.equal(state.data.repos.length, 1, 'short workspace root must still discover the repository')
+  assert.equal(state.data.repos[0].path, realpathSync.native(repo))
+  assert.equal(state.data.commits.length, 1)
+  const listing = await call('worktree', { root: shortContainer })
+  assert.equal(listing.status, 200)
+  assert.equal(listing.data.repos.length, 0, 'a clean repository has no working-tree changes')
 })

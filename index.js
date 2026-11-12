@@ -575,10 +575,16 @@ async function readOnlyConfigNeutralisers(repo, signal, ctx) {
  * @param {string} value 路径。
  */
 function canonicalPath(value) {
+  // Windows 上 JS 版 realpathSync 会保留 8.3 短名（例如 CI 临时目录里的 RUNNER~1），
+  // 而 git 输出的是长路径，按字符串比较会把同一目录误判成两个；原生版本会展开短名。
   try {
-    return realpathSync(value)
+    return realpathSync.native(value)
   } catch {
-    return null
+    try {
+      return realpathSync(value)
+    } catch {
+      return null
+    }
   }
 }
 
@@ -623,7 +629,7 @@ function resolveWorkspaceRoot(value) {
   if (!existsSync(value)) return null
   try {
     if (!statSync(value).isDirectory()) return null
-    return realpathSync(value)
+    return canonicalPath(value)
   } catch {
     return null
   }

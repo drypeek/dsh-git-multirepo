@@ -12,6 +12,10 @@ All notable changes to this project are documented here. Versions follow [Semant
 - Working tree listings report per-repository totals, branch/upstream state and truncation; filters reuse repository chips and the search box.
 - Working tree diffs reuse the existing diff tab: commit diffs keep their parameters, while changes diffs add a `scope` parameter and restore correctly after a page reload.
 
+### Fixed
+
+- Host path canonicalization now expands Windows 8.3 short names (for example `RUNNER~1` in CI temporary directories), so repositories are still discovered when the workspace root uses a short path.
+
 ### Limits
 
 - Conflicted files are listed but not rendered (no combined diff yet).
