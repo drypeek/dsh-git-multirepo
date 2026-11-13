@@ -699,7 +699,7 @@ test('agent tools expose read-only state, changes, commits and diffs', async () 
   const exec = { signal: new AbortController().signal, agent: { session: { header: { cwd: repo } } } }
   const state = await host.tools.get('git_multirepo_state').execute({}, exec)
   assert.equal(state.repos.length, 1)
-  assert.equal(state.repos[0].path, repo)
+  assert.equal(state.repos[0].path, realpathSync.native(repo))
   assert.notEqual(state.repos[0].branch, '')
   assert.equal(state.repos[0].dirty, false)
   const commit = state.commits[0]
