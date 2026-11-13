@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here. Versions follow [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- **AI integration (read-only).** The Host registers five model-facing tools — `git_multirepo_state`, `git_multirepo_changes`, `git_multirepo_commit`, `git_multirepo_commit_diff` and `git_multirepo_change_diff` — plus a short system-prompt section, so the agent can inspect repository status, commits and diffs without raw git commands. The tools reuse the same workspace boundary, read-only processors and size limits as the UI; they never fetch, merge or modify files. Hosts without the `tools`/`systemPrompt` services keep working unchanged.
+- **Add to chat.** Each commit row has an「添加到对话」/ “Add to chat” action that posts the repository, commit and changed files to `POST /api/git-multirepo/chat`; the Host queues a normal user message on the current session, so the AI can explain the change with the tools above.
+
 ## 0.2.0 — 2026-11-11
 
 ### Added
