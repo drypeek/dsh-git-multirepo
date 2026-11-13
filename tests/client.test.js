@@ -872,7 +872,7 @@ test('zh and en dictionaries expose identical keys', () => {
   for (const key of required) assert.ok(zhKeys.includes(key), `missing i18n key: ${key}`)
 })
 
-test('commit row adds the commit to the current conversation', async () => {
+test('commit row adds the commit to the current conversation from the context menu', async () => {
   const requests = []
   const client = loadClient(requestFetch(requests))
   const renderer = new HookRenderer(client.view, null)
@@ -883,9 +883,24 @@ test('commit row adds the commit to the current conversation', async () => {
   deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'CHAT ME', hash))
   await renderer.flush()
 
-  const button = findOne(renderer.tree, (node) => node.type === 'button' && node.props?.['data-gm-chat'] === hash)
-  assert.ok(button, 'commit row should expose an add-to-chat button')
-  button.props.onClick({ stopPropagation() {} })
+  const openMenu = async () => {
+    const row = findOne(
+      renderer.tree,
+      (node) => typeof node.props?.onContextMenu === 'function' && node.props?.['data-gm-repo'] === 'repo',
+    )
+    assert.ok(row, 'commit row should expose a context menu')
+    row.props.onContextMenu({ preventDefault() {}, stopPropagation() {}, clientX: 20, clientY: 30 })
+    await renderer.flush()
+    const menu = findOne(renderer.tree, (node) => node.props?.role === 'menu')
+    assert.ok(menu, 'right-click should open the commit menu')
+    const item = findOne(menu, (node) => node.type === 'button' && node.props?.role === 'menuitem')
+    assert.ok(item, 'menu should offer an add-to-chat item')
+    return item
+  }
+
+  const item = await openMenu()
+  assert.equal(findOne(renderer.tree, (node) => node.props?.['data-gm-chat']), undefined, 'no always-visible button')
+  item.props.onClick()
   await renderer.flush()
 
   const chat = deferredRequest(requests, 'chat', 'C:/chat-workspace/repo')
@@ -895,10 +910,10 @@ test('commit row adds the commit to the current conversation', async () => {
   assert.equal(chat.url.searchParams.get('hash'), hash)
   chat.resolve({ status: 'queued' })
   await renderer.flush()
-  const added = findOne(renderer.tree, (node) => node.type === 'button' && node.props?.['data-gm-chat'] === hash)
-  assert.match(textContent(added), /chat\.added/)
+  assert.match(textContent(renderer.tree), /chat\.added/)
 
-  added.props.onClick({ stopPropagation() {} })
+  const retry = await openMenu()
+  retry.props.onClick()
   await renderer.flush()
   deferredRequest(requests, 'chat', 'C:/chat-workspace/repo').respond({ error: 'agent-unavailable' }, 503)
   await renderer.flush()

@@ -59,6 +59,8 @@ window.__ModuleLoader__.load({
       'chat.added': '已添加',
       'chat.addHint': '把该提交添加到当前对话，让 AI 解释改动',
       'chat.addFailed': '添加到对话失败：{message}',
+      'chat.menuLabel': '提交操作',
+      'chat.menuHint': '右键添加到对话',
       'fetch.ok': '已拉取 {count} 个仓库',
       'fetch.partial': '已拉取，{count} 个仓库失败',
       'fetch.error': '拉取请求失败：{message}',
@@ -195,6 +197,8 @@ window.__ModuleLoader__.load({
       'chat.added': 'Added',
       'chat.addHint': 'Add this commit to the current conversation so the AI can explain it',
       'chat.addFailed': 'Could not add to chat: {message}',
+      'chat.menuLabel': 'Commit actions',
+      'chat.menuHint': 'Right-click to add to chat',
       'fetch.ok': 'Fetched {count} repositories',
       'fetch.partial': 'Fetched, {count} failed',
       'fetch.error': 'Fetch request failed: {message}',
@@ -357,9 +361,10 @@ window.__ModuleLoader__.load({
 .gm-down{color:var(--dsw-alias-label-secondary)}
 .gm-fetch-ok{color:var(--dsw-alias-state-success-primary)}
 .gm-fetch-fail{color:var(--dsw-alias-state-error-primary)}
-.gm-chat-btn{flex:none;margin-left:auto;border:.5px solid var(--dsw-alias-border-l1);background:0 0;color:var(--dsw-alias-label-secondary);font:inherit;font-size:10px;line-height:1.5;padding:1px 7px;border-radius:3px;cursor:pointer;white-space:nowrap}
-.gm-chat-btn:hover{color:var(--dsw-alias-brand-primary);border-color:var(--dsw-alias-brand-primary)}
-.gm-chat-btn[disabled]{opacity:.5;cursor:default}
+.gm-menu-layer{position:fixed;inset:0;z-index:1000}
+.gm-menu{position:fixed;min-width:160px;padding:4px;border:.5px solid var(--dsw-alias-border-l1);border-radius:6px;background:var(--dsw-alias-bg-base);box-shadow:0 8px 24px rgba(0,0,0,.18);display:flex;flex-direction:column}
+.gm-menu-item{display:flex;align-items:center;border:0;background:0 0;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;line-height:1.6;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left;white-space:nowrap}
+.gm-menu-item:hover,.gm-menu-item:focus-visible{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.16));outline:none}
 .gm-list{flex:auto;min-height:0;overflow:auto;padding:2px 0 24px;position:relative}
 .gm-list::-webkit-scrollbar-track{margin:2px}
 .gm-row{display:flex;align-items:flex-start;gap:10px;padding:4px 20px;cursor:pointer;outline:none;scroll-margin-top:56px}
@@ -1060,6 +1065,7 @@ window.__ModuleLoader__.load({
         const [fetching, setFetching] = useState(false)
         const [fetchReport, setFetchReport] = useState(null)
         const [chatAdd, setChatAdd] = useState({ status: 'idle', repo: '', hash: '', message: '' })
+        const [chatMenu, setChatMenu] = useState(null)
         const [state, setState] = useState({ status: 'idle', data: null, failure: null, key: '' })
         const [confirmingFetch, setConfirmingFetch] = useState(false)
         const [openDiffError, setOpenDiffError] = useState(null)
@@ -1138,6 +1144,23 @@ window.__ModuleLoader__.load({
           setQuery('')
           setTimeRange('all')
         }, [cwd])
+
+        // 右键菜单在页面滚动或按 Esc 时关闭；测试环境的 DOM 桩下跳过绑定。
+        useEffect(() => {
+          if (chatMenu === null) return undefined
+          if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') return undefined
+          const close = () => setChatMenu(null)
+          const onKeyDown = (event) => {
+            if (event.key === 'Escape') close()
+          }
+          document.addEventListener('keydown', onKeyDown)
+          const scroller = typeof window !== 'undefined' && typeof window.addEventListener === 'function' ? window : null
+          scroller?.addEventListener('scroll', close, true)
+          return () => {
+            document.removeEventListener('keydown', onKeyDown)
+            scroller?.removeEventListener('scroll', close, true)
+          }
+        }, [chatMenu])
 
         useEffect(() => {
           if (typeof cwd !== 'string' || cwd === '') {
@@ -1741,6 +1764,46 @@ window.__ModuleLoader__.load({
               )
             : null
 
+        // 右键菜单贴住光标；屏幕边缘时向视口内收，避免被裁掉。
+        const viewportWidth = typeof window !== 'undefined' && Number.isFinite(window.innerWidth) ? window.innerWidth : 1024
+        const viewportHeight = typeof window !== 'undefined' && Number.isFinite(window.innerHeight) ? window.innerHeight : 768
+        const chatMenuLayer =
+          chatMenu === null
+            ? null
+            : h(
+                'div',
+                { className: 'gm-menu-layer', onClick: () => setChatMenu(null) },
+                h(
+                  'div',
+                  {
+                    className: 'gm-menu',
+                    role: 'menu',
+                    'aria-label': t('chat.menuLabel'),
+                    style: {
+                      left: `${Math.max(8, Math.min(chatMenu.x, viewportWidth - 180))}px`,
+                      top: `${Math.max(8, Math.min(chatMenu.y, viewportHeight - 48))}px`,
+                    },
+                    onClick: (event) => event.stopPropagation(),
+                    onContextMenu: (event) => event.preventDefault(),
+                  },
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      role: 'menuitem',
+                      className: 'gm-menu-item',
+                      autoFocus: true,
+                      onClick: () => {
+                        const commit = chatMenu.commit
+                        setChatMenu(null)
+                        addToChat(commit)
+                      },
+                    },
+                    t('chat.add'),
+                  ),
+                ),
+              )
+
         if (state.status === 'no-workspace') {
           return h(
             'div',
@@ -2289,13 +2352,35 @@ window.__ModuleLoader__.load({
                   role: 'button',
                   tabIndex: 0,
                   'aria-expanded': expanded,
-                  title: commit.remoteOnly === true ? t('badge.remoteHint') : t('detail.expand'),
+                  title: `${commit.remoteOnly === true ? t('badge.remoteHint') : t('detail.expand')} · ${t('chat.menuHint')}`,
                   onClick: activate,
                   onKeyDown: (event) => {
                     if (event.key === 'Enter' || event.key === ' ') {
                       event.preventDefault()
                       activate()
+                      return
                     }
+                    if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+                      event.preventDefault()
+                      // 键盘没有光标坐标，改为贴在当前行下方；没有 DOM 时回退到左上角。
+                      const rect = typeof event.currentTarget?.getBoundingClientRect === 'function'
+                        ? event.currentTarget.getBoundingClientRect()
+                        : null
+                      setChatMenu({
+                        commit,
+                        x: rect === null ? 0 : rect.left + 8,
+                        y: rect === null ? 0 : rect.bottom + 4,
+                      })
+                    }
+                  },
+                  onContextMenu: (event) => {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    setChatMenu({
+                      commit,
+                      x: Number.isFinite(event.clientX) ? event.clientX : 0,
+                      y: Number.isFinite(event.clientY) ? event.clientY : 0,
+                    })
                   },
                   'data-gm-repo': commit.repo,
                   'data-gm-head': isHeadRef(commit.refs) ? 'true' : undefined,
@@ -2335,29 +2420,6 @@ window.__ModuleLoader__.load({
                     refs === '' ? null : h('span', { className: 'gm-refs', title: commit.refs }, refs),
                     h('span', { className: 'gm-author', title: commit.author }, commit.author),
                     h('span', { className: 'gm-hash', title: commit.hash }, commit.short),
-                    h(
-                      'button',
-                      {
-                        type: 'button',
-                        className: 'gm-chat-btn',
-                        'data-gm-chat': commit.hash,
-                        title:
-                          chatAdd.status === 'error' && chatAdd.hash === commit.hash
-                            ? chatAdd.message
-                            : t('chat.addHint'),
-                        disabled: chatAdd.status === 'sending' && chatAdd.hash === commit.hash,
-                        onClick: (event) => {
-                          event.stopPropagation()
-                          addToChat(commit)
-                        },
-                        onKeyDown: (event) => event.stopPropagation(),
-                      },
-                      chatAdd.status === 'sending' && chatAdd.hash === commit.hash
-                        ? t('chat.adding')
-                        : chatAdd.status === 'sent' && chatAdd.hash === commit.hash
-                          ? t('chat.added')
-                          : t('chat.add'),
-                    ),
                   ),
                 ),
               ),
@@ -2523,6 +2585,7 @@ window.__ModuleLoader__.load({
           { className: 'gm-root', 'data-gm-status': state.status, 'data-gm-mode': 'history' },
           h('style', null, STYLE),
           toolbar,
+          chatMenuLayer,
           confirmingFetch
             ? h(
                 'div',
@@ -2564,6 +2627,7 @@ window.__ModuleLoader__.load({
               ? h('span', { className: 'gm-meta gm-meta-warn' }, t('state.truncated'))
               : null,
             loading && data !== null ? h('span', { className: 'gm-meta' }, t('state.loading')) : null,
+            chatAdd.status === 'sent' ? h('span', { className: 'gm-meta gm-meta-ok' }, t('chat.added')) : null,
             fetchReport === null
               ? null
               : h(
