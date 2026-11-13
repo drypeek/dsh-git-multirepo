@@ -15,6 +15,8 @@ window.__ModuleLoader__.load({
     const COMMIT_URL = '/api/git-multirepo/commit'
     /** 远程拉取路由。 */
     const FETCH_URL = '/api/git-multirepo/fetch'
+    /** 把提交解释请求转成当前会话消息的路由。 */
+    const CHAT_URL = '/api/git-multirepo/chat'
     /** 单个文件差异路由。 */
     const PATCH_URL = '/api/git-multirepo/patch'
     /** 工作区未提交改动路由。 */
@@ -75,6 +77,11 @@ window.__ModuleLoader__.load({
       'fetch.untriedNote': '超时前尚未开始的仓库没有尝试拉取。',
       'fetch.unknownError': '未知错误',
       'fetch.timeoutWithFailures': '等待超时，超时前有 {count} 个仓库没拉取成功，剩下的仓库先跳过了',
+      'chat.add': '添加到对话',
+      'chat.adding': '添加中…',
+      'chat.added': '已添加',
+      'chat.addHint': '把该提交添加到当前对话，让 AI 解释改动',
+      'chat.addFailed': '添加到对话失败：{message}',
       'upstream.ahead': '领先远程 {count} 个提交（本地未推送）',
       'upstream.behind': '落后远程 {count} 个提交（需要拉取）',
       'branch.current': '当前分支',
@@ -219,6 +226,11 @@ window.__ModuleLoader__.load({
       'fetch.untriedNote': 'Repositories not reached before the timeout were not attempted.',
       'fetch.unknownError': 'Unknown error',
       'fetch.timeoutWithFailures': 'Timed out; {count} repositories had failed before the remaining ones were skipped',
+      'chat.add': 'Add to chat',
+      'chat.adding': 'Adding…',
+      'chat.added': 'Added',
+      'chat.addHint': 'Add this commit to the current conversation so the AI can explain it',
+      'chat.addFailed': 'Could not add to chat: {message}',
       'upstream.ahead': '{count} commits ahead of upstream (not pushed)',
       'upstream.behind': '{count} commits behind upstream (needs fetch)',
       'branch.current': 'Current branch',
@@ -413,6 +425,9 @@ window.__ModuleLoader__.load({
 .gm-fetch-toast-repo{flex:none;font-weight:600;color:var(--dsw-alias-label-primary)}
 .gm-fetch-toast-msg{flex:auto;min-width:0}
 .gm-fetch-toast-detail-skip .gm-fetch-toast-msg{opacity:.75}
+.gm-chat-btn{flex:none;margin-left:auto;border:.5px solid var(--dsw-alias-border-l1);background:0 0;color:var(--dsw-alias-label-secondary);font:inherit;font-size:10px;line-height:1.5;padding:1px 7px;border-radius:3px;cursor:pointer;white-space:nowrap}
+.gm-chat-btn:hover{color:var(--dsw-alias-brand-primary);border-color:var(--dsw-alias-brand-primary)}
+.gm-chat-btn[disabled]{opacity:.5;cursor:default}
 .gm-list{flex:auto;min-height:0;overflow:auto;padding:2px 0 24px;position:relative}
 .gm-list::-webkit-scrollbar-track{margin:2px}
 .gm-row{display:flex;align-items:flex-start;gap:10px;padding:4px 20px;cursor:pointer;outline:none;scroll-margin-top:56px}
@@ -1333,6 +1348,7 @@ window.__ModuleLoader__.load({
         const [details, setDetails] = useState({})
         const [fetching, setFetching] = useState(false)
         const [fetchReport, setFetchReport] = useState(null)
+        const [chatAdd, setChatAdd] = useState({ status: 'idle', repo: '', hash: '', message: '' })
         const [state, setState] = useState({ status: 'idle', data: null, failure: null, key: '' })
         const [confirmingFetch, setConfirmingFetch] = useState(false)
         const [fetchDetailsOpen, setFetchDetailsOpen] = useState(false)
@@ -1509,6 +1525,7 @@ window.__ModuleLoader__.load({
           setFetchDetailsOpen(false)
           setConfirmingFetch(false)
           refocusAfterFetchRef.current = false
+          setChatAdd({ status: 'idle', repo: '', hash: '', message: '' })
           setOpenDiffError(null)
           setCollapsedChangeRepos([])
           setChangesState({ status: 'idle', data: null, failure: null, key: '' })
@@ -1915,6 +1932,42 @@ window.__ModuleLoader__.load({
             })
         }, [cwd, t])
 
+        /** 把提交的仓库、哈希和变更文件作为一条用户消息添加到当前对话。 */
+        const addToChat = useCallback(
+          (commit) => {
+            if (typeof cwd !== 'string' || cwd === '') return
+            const workspace = cwd
+            const info = repoInfo.get(commit.repo)
+            const repo = typeof info?.path === 'string' ? info.path : ''
+            const hash = typeof commit.hash === 'string' ? commit.hash : ''
+            if (repo === '' || hash === '') {
+              setChatAdd({ status: 'error', repo: commit.repo, hash, message: t('chat.addHint') })
+              return
+            }
+            setChatAdd({ status: 'sending', repo: commit.repo, hash, message: '' })
+            const params = new URLSearchParams({ session: sessionId, repo, hash })
+            fetch(`${CHAT_URL}?${params.toString()}`, { method: 'POST' })
+              .then(async (response) => {
+                if (!response.ok) throw new Error(await failureMessage(response, t))
+                return response.json()
+              })
+              .then(() => {
+                if (workspaceKeyRef.current !== workspace) return
+                setChatAdd({ status: 'sent', repo: commit.repo, hash, message: '' })
+              })
+              .catch((error) => {
+                if (workspaceKeyRef.current !== workspace) return
+                setChatAdd({
+                  status: 'error',
+                  repo: commit.repo,
+                  hash,
+                  message: error instanceof Error ? error.message : String(error),
+                })
+              })
+          },
+          [cwd, repoInfo, sessionId, t],
+        )
+
         /** 切换视图模式并持久化；刷新页面后仍停留在同一模式。 */
         const switchMode = useCallback((next) => {
           setMode(next)
@@ -2100,6 +2153,24 @@ window.__ModuleLoader__.load({
                 fetchDetailsOpen,
                 () => setFetchDetailsOpen((value) => !value),
               )
+
+        const chatAddError =
+          chatAdd.status === 'error'
+            ? h(
+                'div',
+                { className: 'gm-confirm gm-confirm-error', role: 'alert' },
+                h('span', { className: 'gm-confirm-text' }, text(t, 'chat.addFailed', { message: chatAdd.message })),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'gm-tool',
+                    onClick: () => setChatAdd({ status: 'idle', repo: '', hash: '', message: '' }),
+                  },
+                  t('fetch.confirmNo'),
+                ),
+              )
+            : null
 
         if (state.status === 'no-workspace') {
           return h(
@@ -2702,6 +2773,29 @@ window.__ModuleLoader__.load({
                     refs === '' ? null : h('span', { className: 'gm-refs', title: commit.refs }, refs),
                     h('span', { className: 'gm-author', title: commit.author }, commit.author),
                     h('span', { className: 'gm-hash', title: commit.hash }, commit.short),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'gm-chat-btn',
+                        'data-gm-chat': commit.hash,
+                        title:
+                          chatAdd.status === 'error' && chatAdd.hash === commit.hash
+                            ? chatAdd.message
+                            : t('chat.addHint'),
+                        disabled: chatAdd.status === 'sending' && chatAdd.hash === commit.hash,
+                        onClick: (event) => {
+                          event.stopPropagation()
+                          addToChat(commit)
+                        },
+                        onKeyDown: (event) => event.stopPropagation(),
+                      },
+                      chatAdd.status === 'sending' && chatAdd.hash === commit.hash
+                        ? t('chat.adding')
+                        : chatAdd.status === 'sent' && chatAdd.hash === commit.hash
+                          ? t('chat.added')
+                          : t('chat.add'),
+                    ),
                   ),
                 ),
               ),
@@ -2870,6 +2964,7 @@ window.__ModuleLoader__.load({
           fetchConfirmDialog,
           diffErrorBanner,
           fetchToast,
+          chatAddError,
           h(
             'div',
             { className: 'gm-bar' },
