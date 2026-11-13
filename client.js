@@ -76,11 +76,7 @@ window.__ModuleLoader__.load({
       'fetch.unknownError': '未知错误',
       'fetch.timeoutWithFailures': '等待超时，超时前有 {count} 个仓库没拉取成功，剩下的仓库先跳过了',
       'chat.add': '添加到对话',
-      'chat.added': '已添加到输入框',
       'chat.addHint': '把该提交的引用插入对话输入框，再输入你的问题',
-      'chat.addFailed': '添加到对话失败：{message}',
-      'chat.addUnsupported': '当前 DSH 版本不支持插入对话输入框',
-      'chat.addBusy': '对话输入框正忙，请稍后再试',
       'chat.menuLabel': '提交操作',
       'chat.menuHint': '右键添加到对话',
       'upstream.ahead': '领先远程 {count} 个提交（本地未推送）',
@@ -228,11 +224,7 @@ window.__ModuleLoader__.load({
       'fetch.unknownError': 'Unknown error',
       'fetch.timeoutWithFailures': 'Timed out; {count} repositories had failed before the remaining ones were skipped',
       'chat.add': 'Add to chat',
-      'chat.added': 'Added to the chat input',
       'chat.addHint': 'Insert a reference to this commit into the chat input, then write your question',
-      'chat.addFailed': 'Could not add to chat: {message}',
-      'chat.addUnsupported': 'This DSH version cannot insert into the chat input',
-      'chat.addBusy': 'The chat input is busy; try again in a moment',
       'chat.menuLabel': 'Commit actions',
       'chat.menuHint': 'Right-click to add to chat',
       'upstream.ahead': '{count} commits ahead of upstream (not pushed)',
@@ -804,29 +796,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /**
-     * 生成插入对话输入框的提交上下文块：仓库、提交、变更文件，末尾留空行给用户提问。
-     * @param {string} repo 仓库绝对路径。
-     * @param {any} commit 提交摘要。
-     * @param {any} detail 提交详情（含 files）。
-     */
-    function commitContextText(repo, commit, detail) {
-      const short = typeof detail?.short === 'string' && detail.short !== ''
-        ? detail.short
-        : String(commit.short ?? commit.hash ?? '').slice(0, 8)
-      const subject = typeof detail?.subject === 'string' ? detail.subject : commit.subject ?? ''
-      const lines = [
-        `提交上下文：${commit.repo}@${short} 「${subject}」`,
-        `仓库路径：${repo}`,
-      ]
-      const files = Array.isArray(detail?.files) ? detail.files.slice(0, 30) : []
-      if (files.length > 0) {
-        lines.push('变更文件：')
-        for (const file of files) lines.push(`- ${file.status} ${file.path}`)
-        if (detail.filesTruncated === true) lines.push('- …')
-      }
-      lines.push('', '')
-      return lines.join('\n')
     /** 生成插入对话输入框的极简提交引用：仓库名@短哈希。 */
     function commitReference(commit) {
       const short = typeof commit.short === 'string' && commit.short !== ''
@@ -1384,7 +1353,6 @@ window.__ModuleLoader__.load({
         const [details, setDetails] = useState({})
         const [fetching, setFetching] = useState(false)
         const [fetchReport, setFetchReport] = useState(null)
-        const [chatAdd, setChatAdd] = useState({ status: 'idle', repo: '', hash: '', message: '' })
         const [chatMenu, setChatMenu] = useState(null)
         const [state, setState] = useState({ status: 'idle', data: null, failure: null, key: '' })
         const [confirmingFetch, setConfirmingFetch] = useState(false)
@@ -1562,7 +1530,6 @@ window.__ModuleLoader__.load({
           setFetchDetailsOpen(false)
           setConfirmingFetch(false)
           refocusAfterFetchRef.current = false
-          setChatAdd({ status: 'idle', repo: '', hash: '', message: '' })
           setOpenDiffError(null)
           setCollapsedChangeRepos([])
           setChangesState({ status: 'idle', data: null, failure: null, key: '' })
@@ -1986,27 +1953,15 @@ window.__ModuleLoader__.load({
             })
         }, [cwd, t])
 
-        /** 把提交引用插入当前对话输入框，用户补完问题后自行发送（不会自动发消息）。 */
+        /** 把提交引用插入当前对话输入框；失败时静默，不打扰用户。 */
         const attachToChat = useCallback(
           (commit) => {
             if (typeof cwd !== 'string' || cwd === '') return
-            const hash = typeof commit.hash === 'string' ? commit.hash : ''
-            if (hash === '') {
-              setChatAdd({ status: 'error', repo: commit.repo, hash, message: t('chat.addHint') })
-              return
-            }
-            if (typeof inputActions?.captureInsertion !== 'function' || typeof inputActions?.insertText !== 'function') {
-              setChatAdd({ status: 'error', repo: commit.repo, hash, message: t('chat.addUnsupported') })
-              return
-            }
-            const span = inputActions.captureInsertion()
-            if (inputActions.insertText(commitReference(commit), span) !== true) {
-              setChatAdd({ status: 'error', repo: commit.repo, hash, message: t('chat.addBusy') })
-              return
-            }
-            setChatAdd({ status: 'sent', repo: commit.repo, hash, message: '' })
+            if (typeof commit.hash !== 'string' || commit.hash === '') return
+            if (typeof inputActions?.captureInsertion !== 'function' || typeof inputActions?.insertText !== 'function') return
+            inputActions.insertText(commitReference(commit), inputActions.captureInsertion())
           },
-          [cwd, inputActions, t],
+          [cwd, inputActions],
         )
 
         /** 切换视图模式并持久化；刷新页面后仍停留在同一模式。 */
@@ -2195,23 +2150,6 @@ window.__ModuleLoader__.load({
                 () => setFetchDetailsOpen((value) => !value),
               )
 
-        const chatAddError =
-          chatAdd.status === 'error'
-            ? h(
-                'div',
-                { className: 'gm-confirm gm-confirm-error', role: 'alert' },
-                h('span', { className: 'gm-confirm-text' }, text(t, 'chat.addFailed', { message: chatAdd.message })),
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'gm-tool',
-                    onClick: () => setChatAdd({ status: 'idle', repo: '', hash: '', message: '' }),
-                  },
-                  t('fetch.confirmNo'),
-                ),
-              )
-            : null
 
         // 右键菜单贴住光标；屏幕边缘时向视口内收，避免被裁掉。
         const viewportWidth = typeof window !== 'undefined' && Number.isFinite(window.innerWidth) ? window.innerWidth : 1024
@@ -3045,7 +2983,6 @@ window.__ModuleLoader__.load({
           chatMenuLayer,
           diffErrorBanner,
           fetchToast,
-          chatAddError,
           h(
             'div',
             { className: 'gm-bar' },
@@ -3068,7 +3005,6 @@ window.__ModuleLoader__.load({
               ? h('span', { className: 'gm-meta gm-meta-warn' }, t('state.truncated'))
               : null,
             loading && data !== null ? h('span', { className: 'gm-meta' }, t('state.loading')) : null,
-            chatAdd.status === 'sent' ? h('span', { className: 'gm-meta gm-meta-ok' }, t('chat.added')) : null,
             h(
               'select',
               {
