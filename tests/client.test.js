@@ -959,6 +959,9 @@ test('commit reference markers are matched and rendered as inline chips', () => 
   assert.equal(match.data.hash, 'abcdef123')
   assert.equal(rule.match('plain text without a marker', 0), undefined)
   assert.equal(rule.match('[commit:repo@xyz]', 0), undefined, 'invalid hash must not match')
+  const encoded = rule.match('x [commit:my%20repo@abcdef123] y', 0)
+  assert.ok(encoded, 'URL-encoded repository names should match')
+  assert.equal(encoded.data.repo, 'my repo')
 
   const chip = client.registrations.get('conversation.user.text.node')
   assert.ok(chip, 'the inline chip renderer should be registered')

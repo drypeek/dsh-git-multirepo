@@ -543,11 +543,11 @@ window.__ModuleLoader__.load({
       const short = typeof commit.short === 'string' && commit.short !== ''
         ? commit.short
         : String(commit.hash ?? '').slice(0, 8)
-      return `[commit:${commit.repo}@${short}]\n`
+      return `[commit:${encodeURIComponent(commit.repo)}@${short}]\n`
     }
 
-    /** 提交引用标记的正则；只在 marker 内允许一个 `@`。 */
-    const COMMIT_REFERENCE_PATTERN = /\[commit:([^\]\s@]+?)@([0-9a-fA-F]{7,64})\]/g
+    /** 提交引用标记的正则；仓库名允许 URL 编码后出现 `]`、空格或 `@`。 */
+    const COMMIT_REFERENCE_PATTERN = /\[commit:([^\]\s]+?)@([0-9a-fA-F]{7,64})\]/g
 
     /** UserText 规则：把 `[commit:repo@hash]` 标记解析成行内节点。 */
     const COMMIT_REFERENCE_RULE = {
@@ -556,11 +556,17 @@ window.__ModuleLoader__.load({
       match(text, from) {
         COMMIT_REFERENCE_PATTERN.lastIndex = from
         for (let match = COMMIT_REFERENCE_PATTERN.exec(text); match !== null; match = COMMIT_REFERENCE_PATTERN.exec(text)) {
+          let repo = match[1]
+          try {
+            repo = decodeURIComponent(match[1])
+          } catch {
+            // 保持原样：非法编码由渲染器显示为原始标记内容。
+          }
           return {
             id: 'git-commit',
             start: match.index,
             end: match.index + match[0].length,
-            data: { repo: match[1], hash: match[2] },
+            data: { repo, hash: match[2] },
           }
         }
         return undefined
@@ -2706,6 +2712,7 @@ window.__ModuleLoader__.load({
 
       register('git-multirepo: chat chip styles', () => {
         if (typeof document === 'undefined' || typeof document.createElement !== 'function') return undefined
+        if (document.head === null || document.head === undefined) return undefined
         const style = document.createElement('style')
         style.textContent = COMMIT_CHIP_STYLE
         document.head.appendChild(style)
