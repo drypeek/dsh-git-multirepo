@@ -277,11 +277,13 @@ function requestFetch(requests) {
         ? 'commit'
         : pathname.endsWith('/fetch')
           ? 'fetch'
-          : pathname.endsWith('/worktree-diff')
-            ? 'worktree-diff'
-            : pathname.endsWith('/worktree')
-              ? 'worktree'
-              : 'other'
+          : pathname.endsWith('/chat')
+            ? 'chat'
+            : pathname.endsWith('/worktree-diff')
+              ? 'worktree-diff'
+              : pathname.endsWith('/worktree')
+                ? 'worktree'
+                : 'other'
     const root = parsed.searchParams.get('root') ?? parsed.searchParams.get('repo') ?? ''
     const request = { kind, root, options, url: parsed, settled: false }
     requests.push(request)
@@ -868,4 +870,38 @@ test('zh and en dictionaries expose identical keys', () => {
     'changes.refreshHint',
   ]
   for (const key of required) assert.ok(zhKeys.includes(key), `missing i18n key: ${key}`)
+})
+
+test('commit row adds the commit to the current conversation', async () => {
+  const requests = []
+  const client = loadClient(requestFetch(requests))
+  const renderer = new HookRenderer(client.view, null)
+  renderer.cwd = 'C:/chat-workspace'
+  renderer.props = viewProps(renderer)
+  renderer.render()
+  const hash = 'b'.repeat(40)
+  deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'CHAT ME', hash))
+  await renderer.flush()
+
+  const button = findOne(renderer.tree, (node) => node.type === 'button' && node.props?.['data-gm-chat'] === hash)
+  assert.ok(button, 'commit row should expose an add-to-chat button')
+  button.props.onClick({ stopPropagation() {} })
+  await renderer.flush()
+
+  const chat = deferredRequest(requests, 'chat', 'C:/chat-workspace/repo')
+  assert.equal(chat.options.method, 'POST')
+  assert.equal(chat.url.searchParams.get('session'), 'session')
+  assert.equal(chat.url.searchParams.get('repo'), 'C:/chat-workspace/repo')
+  assert.equal(chat.url.searchParams.get('hash'), hash)
+  chat.resolve({ status: 'queued' })
+  await renderer.flush()
+  const added = findOne(renderer.tree, (node) => node.type === 'button' && node.props?.['data-gm-chat'] === hash)
+  assert.match(textContent(added), /chat\.added/)
+
+  added.props.onClick({ stopPropagation() {} })
+  await renderer.flush()
+  deferredRequest(requests, 'chat', 'C:/chat-workspace/repo').respond({ error: 'agent-unavailable' }, 503)
+  await renderer.flush()
+  assert.match(textContent(renderer.tree), /chat\.addFailed/)
+  renderer.unmount()
 })
