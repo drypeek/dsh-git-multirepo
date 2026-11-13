@@ -872,12 +872,20 @@ test('zh and en dictionaries expose identical keys', () => {
   for (const key of required) assert.ok(zhKeys.includes(key), `missing i18n key: ${key}`)
 })
 
-test('commit row adds the commit to the current conversation from the context menu', async () => {
+test('commit context menu inserts the commit into the chat input', async () => {
   const requests = []
+  const inserted = []
+  const inputActions = {
+    captureInsertion: () => ({ start: 0, end: 0, draftRev: 0 }),
+    insertText: (text) => {
+      inserted.push(text)
+      return true
+    },
+  }
   const client = loadClient(requestFetch(requests))
   const renderer = new HookRenderer(client.view, null)
   renderer.cwd = 'C:/chat-workspace'
-  renderer.props = viewProps(renderer)
+  renderer.props = { ...viewProps(renderer), inputActions }
   renderer.render()
   const hash = 'b'.repeat(40)
   deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'CHAT ME', hash))
@@ -903,19 +911,29 @@ test('commit row adds the commit to the current conversation from the context me
   item.props.onClick()
   await renderer.flush()
 
-  const chat = deferredRequest(requests, 'chat', 'C:/chat-workspace/repo')
-  assert.equal(chat.options.method, 'POST')
-  assert.equal(chat.url.searchParams.get('session'), 'session')
-  assert.equal(chat.url.searchParams.get('repo'), 'C:/chat-workspace/repo')
-  assert.equal(chat.url.searchParams.get('hash'), hash)
-  chat.resolve({ status: 'queued' })
+  assert.equal(
+    requests.filter((entry) => entry.kind === 'chat').length,
+    0,
+    'adding context must not send a message automatically',
+  )
+  deferredRequest(requests, 'commit', 'C:/chat-workspace/repo').resolve({
+    ...detailValue(hash, 'CHAT ME'),
+    files: [{ status: 'M', path: 'file.txt', insertions: 1, deletions: 0 }],
+  })
   await renderer.flush()
+  assert.equal(inserted.length, 1, 'commit context should be inserted into the composer')
+  assert.ok(inserted[0].includes('repo@'))
+  assert.ok(inserted[0].includes(hash.slice(0, 8)))
+  assert.ok(inserted[0].includes('file.txt'))
+  assert.ok(inserted[0].includes('C:/chat-workspace/repo'))
   assert.match(textContent(renderer.tree), /chat\.added/)
 
+  // 输入框正忙时插入失败：显示错误，而不是静默失败。
+  inputActions.insertText = () => false
   const retry = await openMenu()
   retry.props.onClick()
   await renderer.flush()
-  deferredRequest(requests, 'chat', 'C:/chat-workspace/repo').respond({ error: 'agent-unavailable' }, 503)
+  deferredRequest(requests, 'commit', 'C:/chat-workspace/repo').resolve(detailValue(hash))
   await renderer.flush()
   assert.match(textContent(renderer.tree), /chat\.addFailed/)
   renderer.unmount()

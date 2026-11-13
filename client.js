@@ -15,8 +15,6 @@ window.__ModuleLoader__.load({
     const COMMIT_URL = '/api/git-multirepo/commit'
     /** 远程拉取路由。 */
     const FETCH_URL = '/api/git-multirepo/fetch'
-    /** 把提交解释请求转成当前会话消息的路由。 */
-    const CHAT_URL = '/api/git-multirepo/chat'
     /** 单个文件差异路由。 */
     const PATCH_URL = '/api/git-multirepo/patch'
     /** 工作区未提交改动路由。 */
@@ -56,9 +54,11 @@ window.__ModuleLoader__.load({
       'action.fetchHint': '对所有仓库执行 git fetch --all --prune，拉取后自动刷新',
       'chat.add': '添加到对话',
       'chat.adding': '添加中…',
-      'chat.added': '已添加',
-      'chat.addHint': '把该提交添加到当前对话，让 AI 解释改动',
+      'chat.added': '已添加到输入框',
+      'chat.addHint': '把该提交的上下文添加到对话输入框，再输入你的问题',
       'chat.addFailed': '添加到对话失败：{message}',
+      'chat.addUnsupported': '当前 DSH 版本不支持插入对话输入框',
+      'chat.addBusy': '对话输入框正忙，请稍后再试',
       'chat.menuLabel': '提交操作',
       'chat.menuHint': '右键添加到对话',
       'fetch.ok': '已拉取 {count} 个仓库',
@@ -194,9 +194,11 @@ window.__ModuleLoader__.load({
       'action.fetchHint': 'Run git fetch --all --prune for every repository, then refresh',
       'chat.add': 'Add to chat',
       'chat.adding': 'Adding…',
-      'chat.added': 'Added',
-      'chat.addHint': 'Add this commit to the current conversation so the AI can explain it',
+      'chat.added': 'Added to the chat input',
+      'chat.addHint': 'Insert this commit context into the chat input, then write your question',
       'chat.addFailed': 'Could not add to chat: {message}',
+      'chat.addUnsupported': 'This DSH version cannot insert into the chat input',
+      'chat.addBusy': 'The chat input is busy; try again in a moment',
       'chat.menuLabel': 'Commit actions',
       'chat.menuHint': 'Right-click to add to chat',
       'fetch.ok': 'Fetched {count} repositories',
@@ -544,6 +546,31 @@ window.__ModuleLoader__.load({
         value = value.split(`{${name}}`).join(String(values[name]))
       }
       return value
+    }
+
+    /**
+     * 生成插入对话输入框的提交上下文块：仓库、提交、变更文件，末尾留空行给用户提问。
+     * @param {string} repo 仓库绝对路径。
+     * @param {any} commit 提交摘要。
+     * @param {any} detail 提交详情（含 files）。
+     */
+    function commitContextText(repo, commit, detail) {
+      const short = typeof detail?.short === 'string' && detail.short !== ''
+        ? detail.short
+        : String(commit.short ?? commit.hash ?? '').slice(0, 8)
+      const subject = typeof detail?.subject === 'string' ? detail.subject : commit.subject ?? ''
+      const lines = [
+        `提交上下文：${commit.repo}@${short} 「${subject}」`,
+        `仓库路径：${repo}`,
+      ]
+      const files = Array.isArray(detail?.files) ? detail.files.slice(0, 30) : []
+      if (files.length > 0) {
+        lines.push('变更文件：')
+        for (const file of files) lines.push(`- ${file.status} ${file.path}`)
+        if (detail.filesTruncated === true) lines.push('- …')
+      }
+      lines.push('', '')
+      return lines.join('\n')
     }
 
     /** 拉取图标。 */
@@ -1050,7 +1077,7 @@ window.__ModuleLoader__.load({
         return count(repo.conflicted) + count(repo.staged) + count(repo.unstaged) + count(repo.untracked)
       }
       /** 所有仓库提交合并成的一条时间线。 */
-      return function GitView({ sessionId, useSessions }) {
+      return function GitView({ sessionId, useSessions, inputActions }) {
         const cwd = useSessions((sessions) => sessions.byId[sessionId]?.cwd)
 
         const [allBranches, setAllBranches] = useState(false)
@@ -1555,10 +1582,14 @@ window.__ModuleLoader__.load({
             })
         }, [cwd, t])
 
-        /** 把提交的仓库、哈希和变更文件作为一条用户消息添加到当前对话。 */
-        const addToChat = useCallback(
+        /** 把提交上下文插入当前对话输入框，用户补完问题后自行发送（不会自动发消息）。 */
+        const attachToChat = useCallback(
           (commit) => {
             if (typeof cwd !== 'string' || cwd === '') return
+            if (typeof inputActions?.captureInsertion !== 'function' || typeof inputActions?.insertText !== 'function') {
+              setChatAdd({ status: 'error', repo: commit.repo, hash: String(commit.hash ?? ''), message: t('chat.addUnsupported') })
+              return
+            }
             const workspace = cwd
             const info = repoInfo.get(commit.repo)
             const repo = typeof info?.path === 'string' ? info.path : ''
@@ -1568,14 +1599,17 @@ window.__ModuleLoader__.load({
               return
             }
             setChatAdd({ status: 'sending', repo: commit.repo, hash, message: '' })
-            const params = new URLSearchParams({ session: sessionId, repo, hash })
-            fetch(`${CHAT_URL}?${params.toString()}`, { method: 'POST' })
+            const params = new URLSearchParams({ repo, hash })
+            fetch(`${COMMIT_URL}?${params.toString()}`)
               .then(async (response) => {
                 if (!response.ok) throw new Error(await failureMessage(response, t))
                 return response.json()
               })
-              .then(() => {
+              .then((detail) => {
                 if (workspaceKeyRef.current !== workspace) return
+                const text = commitContextText(repo, commit, detail)
+                const span = inputActions.captureInsertion()
+                if (inputActions.insertText(text, span) !== true) throw new Error(t('chat.addBusy'))
                 setChatAdd({ status: 'sent', repo: commit.repo, hash, message: '' })
               })
               .catch((error) => {
@@ -1588,7 +1622,7 @@ window.__ModuleLoader__.load({
                 })
               })
           },
-          [cwd, repoInfo, sessionId, t],
+          [cwd, repoInfo, inputActions, t],
         )
 
         /** 切换视图模式并持久化；刷新页面后仍停留在同一模式。 */
@@ -1796,7 +1830,7 @@ window.__ModuleLoader__.load({
                       onClick: () => {
                         const commit = chatMenu.commit
                         setChatMenu(null)
-                        addToChat(commit)
+                        attachToChat(commit)
                       },
                     },
                     t('chat.add'),
