@@ -910,30 +910,18 @@ test('commit context menu inserts the commit into the chat input', async () => {
   assert.equal(findOne(renderer.tree, (node) => node.props?.['data-gm-chat']), undefined, 'no always-visible button')
   item.props.onClick()
   await renderer.flush()
-
   assert.equal(
-    requests.filter((entry) => entry.kind === 'chat').length,
+    requests.filter((entry) => entry.kind === 'commit' || entry.kind === 'chat').length,
     0,
-    'adding context must not send a message automatically',
+    'adding a reference must not send or fetch anything',
   )
-  deferredRequest(requests, 'commit', 'C:/chat-workspace/repo').resolve({
-    ...detailValue(hash, 'CHAT ME'),
-    files: [{ status: 'M', path: 'file.txt', insertions: 1, deletions: 0 }],
-  })
-  await renderer.flush()
-  assert.equal(inserted.length, 1, 'commit context should be inserted into the composer')
-  assert.ok(inserted[0].includes('repo@'))
-  assert.ok(inserted[0].includes(hash.slice(0, 8)))
-  assert.ok(inserted[0].includes('file.txt'))
-  assert.ok(inserted[0].includes('C:/chat-workspace/repo'))
+  assert.deepEqual(inserted, [`repo@${hash.slice(0, 8)}\n`], 'only a compact commit reference is inserted')
   assert.match(textContent(renderer.tree), /chat\.added/)
 
   // 输入框正忙时插入失败：显示错误，而不是静默失败。
   inputActions.insertText = () => false
   const retry = await openMenu()
   retry.props.onClick()
-  await renderer.flush()
-  deferredRequest(requests, 'commit', 'C:/chat-workspace/repo').resolve(detailValue(hash))
   await renderer.flush()
   assert.match(textContent(renderer.tree), /chat\.addFailed/)
   renderer.unmount()
