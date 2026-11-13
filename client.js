@@ -46,7 +46,7 @@ window.__ModuleLoader__.load({
     /** 确认拉取后的免确认窗口（毫秒）；fetch 只更新远程引用，不值得每次都打断。 */
     const FETCH_CONFIRM_TTL_MS = 10 * 60 * 1000
     /** 拉取结果横幅的自动消失时间（毫秒）。 */
-    const FETCH_TOAST_MS = 6000
+    const FETCH_TOAST_MS = 3000
     /** 最近一次确认拉取的时间；只在当前页面会话内有效，刷新后恢复确认。 */
     let fetchConfirmedAt = 0
 
