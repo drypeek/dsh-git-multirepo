@@ -24,7 +24,7 @@ This is a third-party plugin for DeepSeek Harness (DSH), with no affiliation to 
 - Expand commit messages and changed files; open a file diff in the right sidebar.
 - Filter by repository, date, commit message, author, or short hash.
 - Check uncommitted changes and ahead/behind counts, and fetch updates for multiple repositories.
-- Ask the AI about the workspace: right-click a commit row and choose **Add to chat** to insert a compact reference (`repository@hash`) into the chat input. Add one or more commits, write your own question, and send them together; the agent resolves the references with the read-only `git_multirepo_*` tools.
+- Ask the AI about the workspace: right-click a commit row and choose **Add to chat** to insert a compact marker (`[commit:repository@hash]`) into the chat input. Add one or more commits, write your own question, and send them together. Sent messages render each marker as an inline chip, and the agent resolves it with the read-only `git_multirepo_*` tools. (The draft input shows the raw marker until it is sent.)
 
 ## Installation
 
