@@ -43,6 +43,12 @@ window.__ModuleLoader__.load({
       '#ff9d4d', '#269a99', '#ff99c3', '#5d7092', '#bd8fe8', '#4e9b5f',
       '#c15c5c', '#3a9bd9', '#b8a04a', '#8f6bc4',
     ]
+    /** 确认拉取后的免确认窗口（毫秒）；fetch 只更新远程引用，不值得每次都打断。 */
+    const FETCH_CONFIRM_TTL_MS = 10 * 60 * 1000
+    /** 拉取结果横幅的自动消失时间（毫秒）。 */
+    const FETCH_TOAST_MS = 6000
+    /** 最近一次确认拉取的时间；只在当前页面会话内有效，刷新后恢复确认。 */
+    let fetchConfirmedAt = 0
 
     /** 中文文案。 */
     const zh = {
@@ -125,6 +131,7 @@ window.__ModuleLoader__.load({
       'diff.openFailed': '打开差异页签失败：{message}',
       'fetch.confirm': '会为 {count} 个仓库拉取最新的远程状态；不会合并代码，也不会改动你工作区里的文件。',
       'fetch.confirmTitle': '要同步远程更新吗？',
+      'fetch.confirmNote': '确认后 10 分钟内不再询问。',
       'fetch.confirmYes': '开始拉取',
       'fetch.confirmNo': '取消',
       'fetch.timedOut': '等待超时，剩下的仓库先跳过了',
@@ -262,6 +269,7 @@ window.__ModuleLoader__.load({
       'diff.openFailed': 'Cannot open the diff tab: {message}',
       'fetch.confirm': '{count} repositories will fetch their latest remote state. Nothing is merged, and your working files stay untouched.',
       'fetch.confirmTitle': 'Sync remote updates?',
+      'fetch.confirmNote': "You won't be asked again for 10 minutes.",
       'fetch.confirmYes': 'Start fetch',
       'fetch.confirmNo': 'Cancel',
       'fetch.timedOut': 'Timed out; the remaining repositories were skipped',
@@ -360,6 +368,7 @@ window.__ModuleLoader__.load({
 .gm-dialog{width:min(440px,100%);box-sizing:border-box;display:flex;flex-direction:column;gap:10px;padding:18px 20px 16px;border:.5px solid var(--dsw-alias-border-l1);border-radius:10px;background:var(--dsw-alias-bg-base);box-shadow:0 16px 48px rgba(0,0,0,.28);color:var(--dsw-alias-label-primary)}
 .gm-dialog-title{margin:0;font-size:14px;font-weight:600;line-height:1.4}
 .gm-dialog-text{margin:0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1.6}
+.gm-dialog-note{margin:0;color:var(--dsw-alias-label-secondary);font-size:11px;line-height:1.5;opacity:.85}
 .gm-dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:6px}
 .gm-dialog-btn{height:30px;padding:0 13px;border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-sm,4px);background:0 0;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;cursor:pointer}
 .gm-dialog-btn:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.16))}
@@ -583,6 +592,7 @@ window.__ModuleLoader__.load({
           },
           h('h2', { id: 'gm-fetch-confirm-title', className: 'gm-dialog-title' }, t('fetch.confirmTitle')),
           h('p', { id: 'gm-fetch-confirm-text', className: 'gm-dialog-text' }, text(t, 'fetch.confirm', { count })),
+          h('p', { className: 'gm-dialog-note' }, t('fetch.confirmNote')),
           h(
             'div',
             { className: 'gm-dialog-actions' },
@@ -1265,6 +1275,16 @@ window.__ModuleLoader__.load({
           return () => document.removeEventListener('keydown', onKeyDown)
         }, [confirmingFetch])
 
+        // 结果横幅只短暂停留，避免一直挡在页面上；测试环境的定时器桩不存在时跳过。
+        useEffect(() => {
+          if (fetchReport === null) return undefined
+          if (typeof setTimeout !== 'function') return undefined
+          const timer = setTimeout(() => setFetchReport(null), FETCH_TOAST_MS)
+          return () => {
+            if (typeof clearTimeout === 'function') clearTimeout(timer)
+          }
+        }, [fetchReport])
+
         // A view instance can be reused while its session cwd changes. Cancel all work and
         // clear state tied to the previous workspace before accepting the new responses.
         useEffect(() => {
@@ -1645,6 +1665,7 @@ window.__ModuleLoader__.load({
 
         const runFetch = useCallback(() => {
           if (typeof cwd !== 'string' || cwd === '') return
+          fetchConfirmedAt = Date.now()
           const requestWorkspace = cwd
           fetchAbortRef.current?.abort()
           const controller = new AbortController()
@@ -1767,7 +1788,8 @@ window.__ModuleLoader__.load({
             'aria-busy': fetching,
             disabled: loading || fetching,
             onClick: () => {
-              if (repos.length > 0) setConfirmingFetch(true)
+              // 刚确认过的短时间内直接拉取，避免每次 fetch 都打断用户。
+              if (repos.length > 0 && Date.now() - fetchConfirmedAt > FETCH_CONFIRM_TTL_MS) setConfirmingFetch(true)
               else runFetch()
             },
           },

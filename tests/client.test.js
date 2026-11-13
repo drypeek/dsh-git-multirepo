@@ -434,9 +434,11 @@ test('late Fetch completion cannot finish a newer Fetch', async () => {
   const nextFetchButton = findOne(renderer.tree, (node) => node.type === 'button' && node.props?.title?.startsWith('action.fetchHint'))
   nextFetchButton.props.onClick()
   await renderer.flush()
-  const nextConfirm = findOne(renderer.tree, (node) => node.type === 'button' && textContent(node) === 'fetch.confirmYes')
-  nextConfirm.props.onClick()
-  await renderer.flush()
+  assert.equal(
+    findOne(renderer.tree, (node) => node.props?.role === 'dialog'),
+    undefined,
+    'a recent confirmation should skip the dialog',
+  )
   const newFetch = deferredRequest(requests, 'fetch', renderer.cwd)
   oldFetch.resolve({ failed: 0, results: [] })
   await renderer.flush()
@@ -535,14 +537,48 @@ test('fetch result is shown in a prominent, dismissible status banner', async ()
 
   startFetch()
   await renderer.flush()
-  confirmFetch()
-  await renderer.flush()
+  assert.equal(findOne(renderer.tree, (node) => node.props?.role === 'dialog'), undefined)
   deferredRequest(requests, 'fetch', renderer.cwd).reject(new Error('network down'))
   await renderer.flush()
   const failure = findOne(renderer.tree, (node) => node.props?.['data-gm-fetch-report'] === 'error')
   assert.ok(failure, 'failed fetch must show an error banner')
   assert.equal(failure.props.role, 'alert')
   assert.ok(textContent(failure).includes('fetch.errorTitle'), 'failure banner needs an error title')
+  renderer.unmount()
+})
+
+test('fetch confirmations are reused for a short while after one confirmation', async () => {
+  const requests = []
+  const client = loadClient(requestFetch(requests))
+  const renderer = new HookRenderer(client.view, null)
+  renderer.cwd = 'C:/remember-workspace'
+  renderer.props = viewProps(renderer)
+  renderer.render()
+  deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'REMEMBER', 'b'.repeat(40)))
+  await renderer.flush()
+
+  const clickFetch = () =>
+    findOne(renderer.tree, (node) => node.type === 'button' && node.props?.title?.startsWith('action.fetchHint')).props.onClick()
+
+  clickFetch()
+  await renderer.flush()
+  findOne(renderer.tree, (node) => node.type === 'button' && textContent(node) === 'fetch.confirmYes').props.onClick()
+  await renderer.flush()
+  deferredRequest(requests, 'fetch', renderer.cwd).resolve({ failed: 0, results: [{ name: 'repo', ok: true }] })
+  await renderer.flush()
+  deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'REMEMBER', 'b'.repeat(40)))
+  await renderer.flush()
+
+  // 10 分钟窗口内再次拉取：不再弹确认框，直接开始。
+  clickFetch()
+  await renderer.flush()
+  assert.equal(
+    findOne(renderer.tree, (node) => node.props?.role === 'dialog'),
+    undefined,
+    'a recent confirmation should be reused instead of asking again',
+  )
+  deferredRequest(requests, 'fetch', renderer.cwd).resolve({ failed: 0, results: [] })
+  await renderer.flush()
   renderer.unmount()
 })
 
