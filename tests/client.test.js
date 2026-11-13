@@ -192,6 +192,7 @@ function loadClient(fetchImpl, localStorage = new Map()) {
   const registrations = new Map()
   const openedTabs = []
   const dictionaries = new Map()
+  const rules = []
   const storage = {
     getItem(key) {
       return localStorage.has(key) ? localStorage.get(key) : null
@@ -224,6 +225,9 @@ function loadClient(fetchImpl, localStorage = new Map()) {
   vm.runInNewContext(source, sandbox, { filename: 'client.js' })
   const translate = (key) => key
   const ctx = {
+    get(name) {
+      return ctx[name]
+    },
     effect(start) {
       return start()
     },
@@ -232,6 +236,14 @@ function loadClient(fetchImpl, localStorage = new Map()) {
       register: (namespace, value) => {
         dictionaries.set(namespace, value)
         return undefined
+      },
+    },
+    uiConversation: {
+      userText: {
+        register: (rule) => {
+          rules.push(rule)
+          return undefined
+        },
       },
     },
     sidebarRightTabs: { register: () => undefined },
@@ -258,6 +270,8 @@ function loadClient(fetchImpl, localStorage = new Map()) {
     storage,
     openedTabs,
     dictionaries,
+    rules,
+    registrations,
   }
 }
 
@@ -915,7 +929,7 @@ test('commit context menu inserts the commit into the chat input', async () => {
     0,
     'adding a reference must not send or fetch anything',
   )
-  assert.deepEqual(inserted, [`repo@${hash.slice(0, 8)}\n`], 'only a compact commit reference is inserted')
+  assert.deepEqual(inserted, [`[commit:repo@${hash.slice(0, 8)}]\n`], 'only a compact commit marker is inserted')
   assert.doesNotMatch(textContent(renderer.tree), /chat\.add(?:ed|Failed)/, 'success is reported silently')
 
   // 输入框正忙时插入失败：同样静默，不再插入，也不出现提示。
@@ -926,4 +940,32 @@ test('commit context menu inserts the commit into the chat input', async () => {
   assert.equal(inserted.length, 1)
   assert.doesNotMatch(textContent(renderer.tree), /chat\.add(?:ed|Failed)/, 'failure is silent too')
   renderer.unmount()
+})
+
+test('commit reference markers are matched and rendered as inline chips', () => {
+  const requests = []
+  const client = loadClient(requestFetch(requests))
+  const rule = client.rules.find((item) => item.id === 'git-commit')
+  assert.ok(rule, 'the user-text rule should be registered')
+
+  const text = '看看 [commit:dsh-git-multirepo@abcdef123] 这个提交\n'
+  const match = rule.match(text, 0)
+  assert.ok(match)
+  assert.equal(match.id, 'git-commit')
+  assert.equal(match.start, text.indexOf('['))
+  assert.equal(match.end, text.indexOf(']') + 1)
+  assert.equal(text.slice(match.start, match.end), '[commit:dsh-git-multirepo@abcdef123]')
+  assert.equal(match.data.repo, 'dsh-git-multirepo')
+  assert.equal(match.data.hash, 'abcdef123')
+  assert.equal(rule.match('plain text without a marker', 0), undefined)
+  assert.equal(rule.match('[commit:repo@xyz]', 0), undefined, 'invalid hash must not match')
+
+  const chip = client.registrations.get('conversation.user.text.node')
+  assert.ok(chip, 'the inline chip renderer should be registered')
+  const raw = text.slice(match.start, match.end)
+  const tree = chip({ node: { data: match.data }, raw })
+  const content = textContent(tree)
+  assert.ok(content.includes('dsh-git-multirepo'))
+  assert.ok(content.includes('abcdef1'))
+  assert.equal(tree.props.title, raw)
 })

@@ -538,13 +538,58 @@ window.__ModuleLoader__.load({
       return value
     }
 
-    /** 生成插入对话输入框的极简提交引用：仓库名@短哈希。 */
+    /** 生成插入对话输入框的提交引用标记，发送后由 UserText 渲染成胶囊。 */
     function commitReference(commit) {
       const short = typeof commit.short === 'string' && commit.short !== ''
         ? commit.short
         : String(commit.hash ?? '').slice(0, 8)
-      return `${commit.repo}@${short}\n`
+      return `[commit:${commit.repo}@${short}]\n`
     }
+
+    /** 提交引用标记的正则；只在 marker 内允许一个 `@`。 */
+    const COMMIT_REFERENCE_PATTERN = /\[commit:([^\]\s@]+?)@([0-9a-fA-F]{7,64})\]/g
+
+    /** UserText 规则：把 `[commit:repo@hash]` 标记解析成行内节点。 */
+    const COMMIT_REFERENCE_RULE = {
+      id: 'git-commit',
+      order: 40,
+      match(text, from) {
+        COMMIT_REFERENCE_PATTERN.lastIndex = from
+        for (let match = COMMIT_REFERENCE_PATTERN.exec(text); match !== null; match = COMMIT_REFERENCE_PATTERN.exec(text)) {
+          return {
+            id: 'git-commit',
+            start: match.index,
+            end: match.index + match[0].length,
+            data: { repo: match[1], hash: match[2] },
+          }
+        }
+        return undefined
+      },
+    }
+
+    /** 行内提交引用胶囊；草稿编辑器里若未做节点渲染，则显示原始标记。 */
+    function CommitReference({ node, raw }) {
+      const repo = typeof node?.data?.repo === 'string' ? node.data.repo : ''
+      const hash = typeof node?.data?.hash === 'string' ? node.data.hash : ''
+      return h(
+        'span',
+        {
+          className: 'gm-commit-chip',
+          title: typeof raw === 'string' ? raw : `${repo}@${hash}`,
+        },
+        h('span', { className: 'gm-commit-chip-dot' }),
+        h('span', { className: 'gm-commit-chip-repo' }, repo),
+        h('span', { className: 'gm-commit-chip-hash' }, hash.slice(0, 8)),
+      )
+    }
+
+    /** 提交引用胶囊的全局样式：它在 Chat 视图里渲染，不能依赖 Git 视图的 STYLE。 */
+    const COMMIT_CHIP_STYLE = `
+.gm-commit-chip{display:inline-flex;align-items:center;gap:4px;padding:1px 7px;border:.5px solid var(--dsw-alias-border-l1);border-radius:999px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-size:.92em;line-height:1.5;white-space:nowrap;vertical-align:baseline}
+.gm-commit-chip-dot{width:7px;height:7px;border-radius:50%;background:var(--dsw-alias-brand-primary);flex:none}
+.gm-commit-chip-repo{font-weight:600;max-width:220px;overflow:hidden;text-overflow:ellipsis}
+.gm-commit-chip-hash{font-family:var(--dsh-code-font-family,ui-monospace,SFMono-Regular,Consolas,monospace);color:var(--dsw-alias-label-secondary);font-size:.92em}
+`
 
     /** 拉取图标。 */
     function FetchGlyph() {
@@ -2658,6 +2703,30 @@ window.__ModuleLoader__.load({
       }
 
       register('git-multirepo: dictionaries', () => ctx.locale.register(NS, { zh, en }))
+
+      register('git-multirepo: chat chip styles', () => {
+        if (typeof document === 'undefined' || typeof document.createElement !== 'function') return undefined
+        const style = document.createElement('style')
+        style.textContent = COMMIT_CHIP_STYLE
+        document.head.appendChild(style)
+        return () => style.remove()
+      })
+
+      register('git-multirepo: commit reference rule', () => {
+        const uiConversation = typeof ctx.get === 'function' ? ctx.get('uiConversation', false) : ctx.uiConversation
+        const userText = uiConversation?.userText
+        if (typeof userText?.register !== 'function') return undefined
+        return userText.register(COMMIT_REFERENCE_RULE)
+      })
+
+      register('git-multirepo: commit reference chip', () =>
+        ctx.slots.inject('conversation.user.text.node', () =>
+          ctx.slots.register(
+            { name: 'conversation.user.text.node', key: 'git-commit', priority: 100, locale: NS },
+            CommitReference,
+          ),
+        ),
+      )
 
       /** 在右侧栏打开一个文件的差异页签。 */
       const openDiff = (repo, hash, file) => {
