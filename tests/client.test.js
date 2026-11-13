@@ -916,13 +916,14 @@ test('commit context menu inserts the commit into the chat input', async () => {
     'adding a reference must not send or fetch anything',
   )
   assert.deepEqual(inserted, [`repo@${hash.slice(0, 8)}\n`], 'only a compact commit reference is inserted')
-  assert.match(textContent(renderer.tree), /chat\.added/)
+  assert.doesNotMatch(textContent(renderer.tree), /chat\.add(?:ed|Failed)/, 'success is reported silently')
 
-  // 输入框正忙时插入失败：显示错误，而不是静默失败。
+  // 输入框正忙时插入失败：同样静默，不再插入，也不出现提示。
   inputActions.insertText = () => false
   const retry = await openMenu()
   retry.props.onClick()
   await renderer.flush()
-  assert.match(textContent(renderer.tree), /chat\.addFailed/)
+  assert.equal(inserted.length, 1)
+  assert.doesNotMatch(textContent(renderer.tree), /chat\.add(?:ed|Failed)/, 'failure is silent too')
   renderer.unmount()
 })
