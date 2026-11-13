@@ -8,7 +8,7 @@ Please use this repository's **Security → Report a vulnerability** page rather
 
 Include the plugin version, DSH version, OS, affected route or view, and reproduction steps. You can expect an initial response within about a week.
 
-The supported release line is **0.1.x**.
+The supported release line is **0.2.x**.
 
 ## Trust model
 
@@ -24,12 +24,13 @@ An ordinary remote commit does not install `.git/config`. Some execution risks r
 
 ## Read-only operations
 
-The `/state`, `/commit`, and `/patch` routes use the following controls:
+The `/state`, `/commit`, `/patch`, `/worktree` and `/worktree-diff` routes use the following controls:
 
 - **Executable selection.** Git is resolved once from absolute `PATH` entries and invoked by absolute path. Version detection runs from the temporary directory, not a repository. This avoids Windows selecting a repository's own `git.exe`.
 - **Version check.** Git 2.36+ is required. Older versions can interpret `core.fsmonitor=false` as a hook pathname.
 - **Repository configuration.** Before status runs, configuration key names are read in NUL-delimited form with scope information. Local/worktree filter and diff settings, including local includes, are overridden through separate `GIT_CONFIG_KEY_n` and `GIT_CONFIG_VALUE_n` values. A newline in a value or an equals sign in a key cannot become another option. Enumeration failure or an oversized inventory stops the status read.
 - **Execution controls.** Pagers, hooks, fsmonitor, signature display, external diff and text conversion are disabled. Status does not recurse into submodules; discovered submodules receive their own scan and configuration checks.
+- **Working-tree reads.** The `/worktree` route runs only `git status` and `git diff --numstat`. The `/worktree-diff` route runs `git diff` for staged and unstaged changes. Untracked previews read the file directly instead of invoking Git: reads are confined to the repository, symbolic links are not followed, directories are rejected, and reads stop at 512 KB. Conflicted files are listed but not rendered; untracked directories are collapsed.
 - **Offline object reads.** `GIT_NO_LAZY_FETCH=1` and an empty `GIT_ALLOW_PROTOCOL` prevent automatic promisor fetches, even if a repository allows a protocol. Missing objects produce an error. Fetching them requires an explicit operation.
 - **Environment.** Read subprocesses receive a reduced environment without credential variables. They use `GIT_OPTIONAL_LOCKS=0` and literal pathspecs.
 
@@ -57,11 +58,11 @@ The plugin does not commit, push, merge, or update working-tree files. Fetch can
 
 Directory discovery streams entries and has depth, directory, entry and repository limits. Cancellation and deadlines cover traversal, root validation and Git requests; worker and request concurrency are bounded.
 
-Git output and individual responses have size limits. Aggregate history and caches have both count and byte limits, with copied strings to avoid retaining large output buffers through small slices. File lists are truncated at whole entries; a path is never shortened into a different path. Dirty state includes untracked files, and failed status reads are shown as unknown.
+Git output and individual responses have size limits. Aggregate history, working-tree and caches have both count and byte limits, with copied strings to avoid retaining large output buffers through small slices. Working-tree listings cap entries per repository and total response bytes; untracked previews cap file size, line count and line length. File lists are truncated at whole entries; a path is never shortened into a different path. Dirty state includes untracked files, and failed status reads are shown as unknown.
 
 ## Scope and validation limits
 
-In scope: plugin routes, workspace/path checks, Git command construction, Git output parsing, client rendering, and resource use caused by workspace topology.
+In scope: plugin routes, the commit history and working-tree changes views, workspace/path checks, Git command construction, Git output parsing, client rendering, and resource use caused by workspace topology.
 
 Vulnerabilities in DSH, Git, or another project itself are outside this plugin's scope. Reports requiring control of the DSH process, its profile, or trusted user Git configuration are also outside scope.
 

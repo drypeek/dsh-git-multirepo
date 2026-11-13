@@ -60,3 +60,19 @@ jobs:
         run: |
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
             gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag
+
+      - name: Pack release tarballs
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          npm pack
+          cp "dsh-git-multirepo-$version.tgz" "dsh-git-multirepo.tgz"
+
+      - name: Upload release tarballs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          gh release upload "$GITHUB_REF_NAME" \
+            "dsh-git-multirepo-$version.tgz" \
+            "dsh-git-multirepo.tgz" \
+            --clobber

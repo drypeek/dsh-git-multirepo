@@ -17,6 +17,20 @@ window.__ModuleLoader__.load({
     const FETCH_URL = '/api/git-multirepo/fetch'
     /** 单个文件差异路由。 */
     const PATCH_URL = '/api/git-multirepo/patch'
+    /** 工作区未提交改动路由。 */
+    const WORKTREE_URL = '/api/git-multirepo/worktree'
+    /** 工作区单文件差异路由。 */
+    const WORKTREE_DIFF_URL = '/api/git-multirepo/worktree-diff'
+    /** 工作区 diff 支持的改动范围。 */
+    const WORKTREE_SCOPES = ['staged', 'unstaged', 'untracked']
+    /** 改动范围到徽标文案键的映射。 */
+    const WORKTREE_SCOPE_KEYS = {
+      staged: 'changes.staged',
+      unstaged: 'changes.unstaged',
+      untracked: 'changes.untracked',
+    }
+    /** 视图模式（提交历史 / 工作区改动）的持久化键。 */
+    const VIEW_MODE_KEY = 'dsh-git-multirepo:view-mode:v1'
     /** 差异页签的实现标识。 */
     const DIFF_ID = 'git-multirepo-diff'
     /** 差异页签的 kind。 */
@@ -131,6 +145,34 @@ window.__ModuleLoader__.load({
       'error.unsupportedGitVersion': 'Git 版本过低，无法安全读取',
       'error.requestCancelled': '读取请求已取消',
       'error.requestFailed': '读取请求失败',
+      'mode.history': '提交历史',
+      'mode.changes': '工作区改动',
+      'mode.hint': '在提交历史与工作区改动之间切换',
+      'mode.historyHint': '按提交时间线查看各仓库历史',
+      'mode.changesHint': '查看各仓库未提交的工作区改动',
+      'changes.filterPlaceholder': '筛选文件路径 / 仓库名',
+      'changes.empty': '所有仓库都没有未提交改动。',
+      'changes.cleanCount': '{count} 个仓库无改动',
+      'changes.staged': '暂存',
+      'changes.unstaged': '未暂存',
+      'changes.untracked': '未跟踪',
+      'changes.conflicted': '冲突未解决',
+      'changes.binary': '二进制文件，无法预览差异。',
+      'changes.tooLarge': '差异过大，无法预览。',
+      'changes.symbolicLink': '符号链接，无法预览差异。',
+      'changes.directory': '目录：v0.2 暂不展开逐个文件',
+      'changes.conflictUnsupported': '冲突文件的差异暂不支持预览',
+      'changes.loading': '正在读取工作区改动…',
+      'changes.error': '工作区改动读取失败：{message}',
+      'changes.truncated': '改动文件过多，仅显示部分结果',
+      'changes.summary': '{repos} 个仓库有改动 · {files} 个文件 · +{insertions} −{deletions}',
+      'changes.repoSummary': '{files} 个文件',
+      'changes.openDiff': '在右侧栏打开差异',
+      'changes.noMatch': '没有匹配的改动文件。',
+      'changes.refreshHint': '重新读取工作区改动',
+      'changes.unborn': '尚无提交',
+      'changes.repoTruncated': '该仓库文件过多，仅显示部分文件',
+      'changes.diffEmpty': '该文件没有可显示的差异。',
     }
 
     /** 英文文案。 */
@@ -234,6 +276,34 @@ window.__ModuleLoader__.load({
       'error.unsupportedGitVersion': 'Git is too old for safe read-only access',
       'error.requestCancelled': 'The read request was cancelled',
       'error.requestFailed': 'The read request failed',
+      'mode.history': 'Commit history',
+      'mode.changes': 'Working tree',
+      'mode.hint': 'Switch between commit history and working-tree changes',
+      'mode.historyHint': 'Browse each repository history as a commit timeline',
+      'mode.changesHint': 'Inspect uncommitted working-tree changes per repository',
+      'changes.filterPlaceholder': 'Filter file path or repository',
+      'changes.empty': 'No repository has uncommitted changes.',
+      'changes.cleanCount': '{count} clean repositories',
+      'changes.staged': 'Staged',
+      'changes.unstaged': 'Unstaged',
+      'changes.untracked': 'Untracked',
+      'changes.conflicted': 'Unresolved conflicts',
+      'changes.binary': 'Binary file, no diff preview available.',
+      'changes.tooLarge': 'Diff too large to preview.',
+      'changes.symbolicLink': 'Symbolic link, no diff preview available.',
+      'changes.directory': 'Directory: expanding its files is not supported yet',
+      'changes.conflictUnsupported': 'Diff preview for conflicted files is not supported yet',
+      'changes.loading': 'Reading working-tree changes…',
+      'changes.error': 'Working-tree changes failed: {message}',
+      'changes.truncated': 'Too many changed files; only part of the result is shown',
+      'changes.summary': '{repos} repos with changes · {files} files · +{insertions} −{deletions}',
+      'changes.repoSummary': '{files} files',
+      'changes.openDiff': 'Open diff in the right sidebar',
+      'changes.noMatch': 'No changed file matches this filter.',
+      'changes.refreshHint': 'Reload working-tree changes',
+      'changes.unborn': 'No commits yet',
+      'changes.repoTruncated': 'Too many files in this repository; only part of them is shown',
+      'changes.diffEmpty': 'No diff preview available for this file.',
     }
 
     /** 插件样式，随视图渲染。 */
@@ -345,6 +415,53 @@ window.__ModuleLoader__.load({
 .gm-confirm-error .gm-confirm-text{color:var(--dsw-alias-state-error-primary)}
 .gm-retry{margin-left:10px;font:inherit;font-size:11px;padding:1px 8px;border-radius:3px;border:.5px solid var(--dsw-alias-border-l1);background:0 0;color:var(--dsw-alias-brand-primary);cursor:pointer}
 .gm-retry:hover{border-color:var(--dsw-alias-brand-primary)}
+.gm-mode{flex:none;display:inline-flex;border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-sm,4px);overflow:hidden;background:var(--dsw-alias-bg-layer-1)}
+.gm-mode-btn{border:0;background:0 0;font:inherit;font-size:12px;color:var(--dsw-alias-label-secondary);padding:4px 11px;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;gap:5px;transition:background .12s ease,color .12s ease}
+.gm-mode-btn+.gm-mode-btn{border-left:.5px solid var(--dsw-alias-border-l1)}
+.gm-mode-btn:hover{color:var(--dsw-alias-label-primary)}
+.gm-mode-btn[aria-selected=true]{background:color-mix(in srgb,var(--dsw-alias-label-primary) 15%,transparent);color:var(--dsw-alias-label-primary);font-weight:600}
+.gm-mode-btn:focus-visible{outline:none;box-shadow:inset 0 0 0 2px var(--dsw-alias-brand-primary)}
+.gm-mode-badge{font-size:10px;line-height:1.5;padding:0 5px;border-radius:3px;border:.5px solid color-mix(in srgb,var(--dsw-alias-brand-primary) 45%,transparent);color:var(--dsw-alias-brand-primary);font-variant-numeric:tabular-nums}
+.gm-summary{gap:8px;flex-wrap:wrap}
+.gm-summary-part+.gm-summary-part::before{content:'·';margin-right:8px;opacity:.45}
+.gm-summary-link{border:0;background:0 0;padding:0;font:inherit;font-size:12px;cursor:pointer;color:var(--dsw-alias-state-warn-primary);text-decoration:underline;text-underline-offset:2px}
+.gm-summary-link:hover{color:var(--dsw-alias-label-primary)}
+.gm-summary-link:focus-visible{outline:none;border-radius:2px;box-shadow:0 0 0 2px var(--dsw-alias-brand-primary)}
+.gm-grow{flex:auto;min-width:0}
+.gm-changes{padding:4px 16px 24px}
+.gm-wt-repo{margin:6px 0 2px;border:.5px solid var(--dsw-alias-border-l1);border-radius:6px;overflow:hidden;background:var(--dsw-alias-bg-base)}
+.gm-wt-head{display:flex;align-items:center;gap:8px;padding:6px 12px;cursor:pointer;outline:none;user-select:none;background:var(--dsw-alias-bg-layer-1)}
+.gm-wt-head:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.16))}
+.gm-wt-head:focus-visible{box-shadow:inset 0 0 0 2px var(--dsw-alias-brand-primary)}
+.gm-wt-name{flex:none;max-width:240px;font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gm-wt-track{flex:none;display:inline-flex;gap:4px;font-size:10px;font-variant-numeric:tabular-nums}
+.gm-wt-files{flex:none;font-size:11px;color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums}
+.gm-wt-group{border-top:.5px solid var(--dsw-alias-border-l1)}
+.gm-wt-group-title{display:flex;align-items:center;gap:6px;padding:4px 12px 3px;font-size:11px;font-weight:600;color:var(--dsw-alias-label-secondary)}
+.gm-wt-group-count{flex:none;font-size:10px;line-height:1.5;padding:0 5px;border-radius:3px;background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l1);font-variant-numeric:tabular-nums}
+.gm-wt-row{display:flex;align-items:baseline;gap:8px;padding:2px 12px 2px 24px;outline:none;cursor:pointer}
+.gm-wt-row:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.16))}
+.gm-wt-row:focus-visible{box-shadow:inset 0 0 0 2px var(--dsw-alias-brand-primary)}
+.gm-wt-row-disabled{cursor:default;opacity:.55}
+.gm-wt-row-disabled:hover{background:0 0}
+.gm-wt-status{flex:none;width:16px;text-align:center;font-weight:600;font-family:var(--dsh-code-font-family,ui-monospace,SFMono-Regular,Consolas,monospace)}
+.gm-wt-status-A{color:var(--dsw-alias-state-success-primary)}
+.gm-wt-status-D{color:var(--dsw-alias-state-error-primary)}
+.gm-wt-status-M,.gm-wt-status-R,.gm-wt-status-U{color:var(--dsw-alias-state-warn-primary)}
+.gm-wt-path{flex:auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--dsh-code-font-family,ui-monospace,SFMono-Regular,Consolas,monospace);font-size:11px}
+.gm-wt-dir{color:var(--dsw-alias-label-secondary);opacity:.85}
+.gm-wt-file{color:inherit}
+.gm-wt-counts{flex:none;margin-left:auto;padding-left:8px;display:inline-flex;gap:6px;font-variant-numeric:tabular-nums;font-size:11px}
+.gm-wt-add{color:var(--dsw-alias-state-success-primary)}
+.gm-wt-del{color:var(--dsw-alias-state-error-primary)}
+.gm-wt-bin{color:var(--dsw-alias-label-secondary)}
+.gm-wt-empty{padding:24px 20px;color:var(--dsw-alias-label-secondary)}
+.gm-wt-error{border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 45%,transparent)}
+.gm-wt-error .gm-wt-head{background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 8%,transparent)}
+.gm-wt-error .gm-wt-name{color:var(--dsw-alias-state-error-primary)}
+.gm-wt-error-msg{padding:4px 12px 6px;font-size:11px;color:var(--dsw-alias-state-error-primary);word-break:break-word}
+.gm-wt-note{padding:4px 12px 6px;font-size:11px;color:var(--dsw-alias-state-warn-primary)}
+.gm-summary-filtered{color:var(--dsw-alias-label-secondary)}
 /* The Git log tab is a full-surface inspection view: while it is mounted the
    conversation composer is hidden so the timeline can use the whole height. The
    style tag lives inside this view, so it disappears when the user switches back
@@ -377,6 +494,7 @@ window.__ModuleLoader__.load({
 .gd-del-row .gd-sign{color:var(--dsw-alias-state-error-primary)}
 .gd-status{padding:14px 12px;color:var(--dsw-alias-label-secondary);font-size:12px}
 .gd-error{color:var(--dsw-alias-state-error-primary)}
+.gd-scope{flex:none;font-size:10px;line-height:1.6;padding:0 6px;border-radius:3px;border:.5px solid color-mix(in srgb,var(--dsw-alias-brand-primary) 45%,transparent);color:var(--dsw-alias-brand-primary);white-space:nowrap}
 `
 
     /**
@@ -500,10 +618,14 @@ window.__ModuleLoader__.load({
 
     /** 工作区状态缓存：切回视图时先用旧数据渲染，再后台刷新。 */
     const stateCache = new Map()
+    /** 工作区改动缓存：切模式或重挂载时先用旧数据渲染。 */
+    const changesCache = new Map()
     /** 提交详情缓存：重复展开同一条提交不再请求。 */
     const detailCache = new Map()
     /** 状态缓存条目上限。 */
     const STATE_CACHE_LIMIT = 4
+    /** 工作区改动缓存条目上限。 */
+    const CHANGES_CACHE_LIMIT = 4
     /** 详情缓存条目上限。 */
     const DETAIL_CACHE_LIMIT = 120
 
@@ -552,6 +674,22 @@ window.__ModuleLoader__.load({
         .some((item) => item === 'HEAD' || item.startsWith('HEAD -> '))
     }
 
+    /**
+     * 读取持久化的视图模式；非法值（含存储不可用）回落「提交历史」。
+     * @returns {'history' | 'changes'} 视图模式。
+     */
+    function readViewMode() {
+      try {
+        if (typeof localStorage !== 'undefined') {
+          const raw = localStorage.getItem(VIEW_MODE_KEY)
+          if (raw === 'history' || raw === 'changes') return raw
+        }
+      } catch {
+        // 隐私模式读不到本地存储时使用默认模式。
+      }
+      return 'history'
+    }
+
     /** 差异页签参数持久化键：DSH 只持久化页签的 contentId/title，不持久化 navigation.params。 */
     const TAB_PARAMS_KEY = 'dsh-git-multirepo:tab-params:v1'
     /** 最多记住多少个差异页签的定位参数。 */
@@ -565,7 +703,7 @@ window.__ModuleLoader__.load({
      * 记住一个差异页签的定位参数，供同源页面重载后恢复
      * （桌面端冷启动换随机端口时 origin 变化，本地存储无法跨 origin，属已知限制）。
      * @param {string} contentId 页签持久化 id。
-     * @param {{ repo: string, hash: string, file: string }} params 定位参数。
+     * @param {{ repo: string, hash?: string, file: string, scope?: string }} params 定位参数。
      */
     function rememberTabParams(contentId, params) {
       if (contentId === '' || typeof localStorage === 'undefined') return
@@ -588,7 +726,7 @@ window.__ModuleLoader__.load({
     /**
      * 读取一个差异页签记住的定位参数。
      * @param {string} contentId 页签持久化 id。
-     * @returns {{ repo: string, hash: string, file: string } | undefined} 定位参数。
+     * @returns {{ repo: string, hash?: string, file: string, scope?: string } | undefined} 定位参数。
      */
     function recallTabParams(contentId) {
       if (contentId === '' || typeof localStorage === 'undefined') return undefined
@@ -709,11 +847,11 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 构造差异页签组件。
+     * 构造差异页签组件：提交 patch 与工作区改动（scope）共用同一种页签。
      * @param {(key: string) => string} t 翻译函数。
      */
     function createDiffView(t) {
-      /** 单个文件在一次提交中的 unified diff。 */
+      /** 单个文件在一次提交或某类工作区改动中的 unified diff。 */
       return function DiffView({ useTabInfo }) {
         const { tab } = useTabInfo()
         const contentId = typeof tab.contentId === 'string' ? tab.contentId : ''
@@ -722,23 +860,28 @@ window.__ModuleLoader__.load({
         const repo = typeof params.repo === 'string' ? params.repo : ''
         const hash = typeof params.hash === 'string' ? params.hash : ''
         const file = typeof params.file === 'string' ? params.file : ''
+        // 工作区差异页签用 scope 定位，没有提交 hash；旧页签参数没有合法 scope，仍走提交 patch。
+        const scope = WORKTREE_SCOPES.includes(params.scope) ? params.scope : ''
+        const isWorktree = scope !== ''
         const [state, setState] = useState({ status: 'loading' })
 
         useEffect(() => {
-          if (contentId !== '' && repo !== '' && hash !== '' && file !== '') {
-            rememberTabParams(contentId, { repo, hash, file })
-          }
-        }, [contentId, repo, hash, file])
+          if (contentId === '' || repo === '' || file === '') return
+          if (isWorktree) rememberTabParams(contentId, { repo, scope, file })
+          else if (hash !== '') rememberTabParams(contentId, { repo, hash, file })
+        }, [contentId, repo, hash, file, scope])
 
         useEffect(() => {
-          if (repo === '' || hash === '' || file === '') {
+          if (repo === '' || file === '' || (!isWorktree && hash === '')) {
             setState({ status: 'error', message: t('diff.missingParams') })
             return undefined
           }
           const controller = new AbortController()
           setState({ status: 'loading' })
-          const query = new URLSearchParams({ repo, hash, file })
-          fetch(`${PATCH_URL}?${query.toString()}`, { signal: controller.signal })
+          const query = isWorktree
+            ? new URLSearchParams({ repo, scope, file })
+            : new URLSearchParams({ repo, hash, file })
+          fetch(`${isWorktree ? WORKTREE_DIFF_URL : PATCH_URL}?${query.toString()}`, { signal: controller.signal })
             .then(async (response) => {
               if (!response.ok) throw new Error(await failureMessage(response, t))
               return response.json()
@@ -754,14 +897,18 @@ window.__ModuleLoader__.load({
               })
             })
           return () => controller.abort()
-        }, [repo, hash, file])
+        }, [repo, hash, file, scope])
 
+        const hasAdditions = state.status === 'ready' && typeof state.data.additions === 'number'
+        const hasDeletions =
+          state.status === 'ready' && scope !== 'untracked' && typeof state.data.deletions === 'number'
         const head = h(
           'div',
           { className: 'gd-head' },
           h('span', { className: 'gd-name', title: file }, file),
-          state.status === 'ready' ? h('span', { className: 'gd-add' }, `+${state.data.additions}`) : null,
-          state.status === 'ready' ? h('span', { className: 'gd-del' }, `−${state.data.deletions}`) : null,
+          isWorktree ? h('span', { className: 'gd-scope' }, t(WORKTREE_SCOPE_KEYS[scope])) : null,
+          hasAdditions ? h('span', { className: 'gd-add' }, `+${state.data.additions}`) : null,
+          hasDeletions ? h('span', { className: 'gd-del' }, `−${state.data.deletions}`) : null,
         )
 
         if (state.status !== 'ready') {
@@ -779,11 +926,12 @@ window.__ModuleLoader__.load({
         }
 
         const data = state.data
+        const hunks = Array.isArray(data.hunks) ? data.hunks : []
         const rows = []
         let previousOldEnd = 0
         let rendered = 0
         let renderTruncated = false
-        for (const hunk of data.hunks) {
+        for (const hunk of hunks) {
           if (renderTruncated) break
           const info = hunkInfo(hunk.header)
           if (previousOldEnd > 0 && info.oldLine > previousOldEnd) {
@@ -798,7 +946,8 @@ window.__ModuleLoader__.load({
           rows.push(h('div', { className: 'gd-hunk', key: `h${rows.length}` }, hunk.header))
           let oldLine = info.oldLine
           let newLine = info.newLine
-          for (const line of hunk.lines) {
+          const lines = Array.isArray(hunk.lines) ? hunk.lines : []
+          for (const line of lines) {
             if (rendered >= DIFF_RENDER_LIMIT) {
               renderTruncated = true
               break
@@ -829,17 +978,30 @@ window.__ModuleLoader__.load({
           previousOldEnd = info.oldLine + info.oldCount
         }
 
+        // 无法预览的差异原因优先展示（二进制/过大/符号链接），工作区差异用改动文案。
+        const notice = data.tooLarge
+          ? t('changes.tooLarge')
+          : data.symbolicLink
+            ? t('changes.symbolicLink')
+            : data.binary
+              ? t(isWorktree ? 'changes.binary' : 'diff.binary')
+              : ''
         const truncated = data.truncated || renderTruncated
         let body
-        if (data.binary) body = h('div', { className: 'gd-status' }, t('diff.binary'))
-        else if (rows.length === 0) body = h('div', { className: 'gd-status' }, t('diff.empty'))
-        else body = h('div', { className: 'gd-body' }, rows)
+        if (rows.length === 0) {
+          body = h(
+            'div',
+            { className: 'gd-status' },
+            notice !== '' ? notice : t(isWorktree ? 'changes.diffEmpty' : 'diff.empty'),
+          )
+        } else body = h('div', { className: 'gd-body' }, rows)
 
         return h(
           'div',
           { className: 'gd-root' },
           h('style', null, DIFF_STYLE),
           head,
+          notice !== '' && rows.length > 0 ? h('div', { className: 'gd-status' }, notice) : null,
           truncated ? h('div', { className: 'gd-status' }, t('diff.truncated')) : null,
           body,
         )
@@ -858,8 +1020,15 @@ window.__ModuleLoader__.load({
     /**
      * 构造视图组件；t 以闭包传入。
      * @param {(key: string) => string} t 翻译函数。
+     * @param {(repo: string, hash: string, file: string) => void} openDiff 打开提交差异页签。
+     * @param {(repo: string, scope: string, file: string) => void} openWorktreeDiff 打开工作区差异页签。
      */
-    function createView(t, openDiff) {
+    function createView(t, openDiff, openWorktreeDiff) {
+      /** 汇总一个仓库四类改动的文件数（不含被搜索过滤掉的文件）。 */
+      const changeRepoFiles = (repo) => {
+        const count = (list) => (Array.isArray(list) ? list.length : 0)
+        return count(repo.conflicted) + count(repo.staged) + count(repo.unstaged) + count(repo.untracked)
+      }
       /** 所有仓库提交合并成的一条时间线。 */
       return function GitView({ sessionId, useSessions }) {
         const cwd = useSessions((sessions) => sessions.byId[sessionId]?.cwd)
@@ -878,9 +1047,14 @@ window.__ModuleLoader__.load({
         const [state, setState] = useState({ status: 'idle', data: null, failure: null, key: '' })
         const [confirmingFetch, setConfirmingFetch] = useState(false)
         const [openDiffError, setOpenDiffError] = useState(null)
+        // 视图模式：提交历史时间线或工作区改动；首次挂载时从本地存储恢复。
+        const [mode, setMode] = useState(readViewMode)
+        const [changesState, setChangesState] = useState({ status: 'idle', data: null, failure: null, key: '' })
+        const [collapsedChangeRepos, setCollapsedChangeRepos] = useState([])
         const viewKey = `${typeof cwd === 'string' ? cwd : ''}|${allBranches ? 'all' : 'head'}`
         const listRef = useRef(null)
         const fetchAbortRef = useRef(null)
+        const changesAbortRef = useRef(null)
         const detailAbortsRef = useRef(new Map())
         const viewKeyRef = useRef(viewKey)
         const workspaceKeyRef = useRef(cwd)
@@ -900,9 +1074,22 @@ window.__ModuleLoader__.load({
           [openDiff],
         )
 
+        /** 打开工作区差异页签；失败时把原因显示在视图里而不是抛出。 */
+        const openChangeDiffSafe = useCallback(
+          (repo, scope, file) => {
+            try {
+              openWorktreeDiff(repo, scope, file)
+            } catch (error) {
+              setOpenDiffError(error instanceof Error ? error.message : String(error))
+            }
+          },
+          [openWorktreeDiff],
+        )
+
         useEffect(
           () => () => {
             fetchAbortRef.current?.abort()
+            changesAbortRef.current?.abort()
             for (const controller of detailAbortsRef.current.values()) controller.abort()
             detailAbortsRef.current.clear()
           },
@@ -914,6 +1101,8 @@ window.__ModuleLoader__.load({
         useEffect(() => {
           fetchAbortRef.current?.abort()
           fetchAbortRef.current = null
+          changesAbortRef.current?.abort()
+          changesAbortRef.current = null
           for (const controller of detailAbortsRef.current.values()) controller.abort()
           detailAbortsRef.current.clear()
           setFetching(false)
@@ -923,6 +1112,8 @@ window.__ModuleLoader__.load({
           setFetchReport(null)
           setConfirmingFetch(false)
           setOpenDiffError(null)
+          setCollapsedChangeRepos([])
+          setChangesState({ status: 'idle', data: null, failure: null, key: '' })
         }, [cwd])
 
         // Search and time filters belong to a workspace, so do not carry them into a new cwd.
@@ -972,11 +1163,63 @@ window.__ModuleLoader__.load({
           return () => controller.abort()
         }, [cwd, allBranches, reloadToken])
 
+        // 工作区改动只在「改动」模式下请求：切模式或切 cwd 时 abort，并先用缓存渲染。
+        useEffect(() => {
+          if (mode !== 'changes') {
+            changesAbortRef.current?.abort()
+            changesAbortRef.current = null
+            return undefined
+          }
+          if (typeof cwd !== 'string' || cwd === '') {
+            setChangesState({ status: 'no-workspace', data: null, failure: null, key: '' })
+            return undefined
+          }
+          const controller = new AbortController()
+          changesAbortRef.current?.abort()
+          changesAbortRef.current = controller
+          const slotKey = cwd
+          const cached = changesCache.get(slotKey)
+          setChangesState({ status: 'loading', data: cached ?? null, failure: null, key: slotKey })
+          const params = new URLSearchParams({ root: cwd })
+          fetch(`${WORKTREE_URL}?${params.toString()}`, { signal: controller.signal })
+            .then(async (response) => {
+              if (!response.ok) throw new Error(await failureMessage(response, t))
+              return response.json()
+            })
+            .then((value) => {
+              if (controller.signal.aborted || workspaceKeyRef.current !== slotKey) return
+              remember(changesCache, slotKey, value, CHANGES_CACHE_LIMIT)
+              setChangesState({ status: 'ready', data: value, failure: null, key: slotKey })
+            })
+            .catch((error) => {
+              if (controller.signal.aborted || workspaceKeyRef.current !== slotKey) return
+              setChangesState({
+                status: 'error',
+                data: null,
+                failure: error instanceof Error ? error.message : String(error),
+                key: slotKey,
+              })
+            })
+            .finally(() => {
+              if (changesAbortRef.current === controller) changesAbortRef.current = null
+            })
+          return () => controller.abort()
+        }, [cwd, mode, reloadToken])
+
         const cacheKey = viewKey
         const data = state.status === 'error'
           ? null
           : state.key === cacheKey ? state.data ?? stateCache.get(cacheKey) ?? null : stateCache.get(cacheKey) ?? null
         const repos = data?.repos ?? []
+
+        const changesCacheKey = typeof cwd === 'string' ? cwd : ''
+        const changesData =
+          changesState.status === 'error'
+            ? null
+            : changesState.key === changesCacheKey
+              ? changesState.data ?? changesCache.get(changesCacheKey) ?? null
+              : changesCache.get(changesCacheKey) ?? null
+        const changeRepos = Array.isArray(changesData?.repos) ? changesData.repos : []
 
         const repoInfo = useMemo(() => {
           const map = new Map()
@@ -989,11 +1232,84 @@ window.__ModuleLoader__.load({
           [hiddenRepos, repoInfo],
         )
 
+        const changeRepoInfo = useMemo(() => {
+          const map = new Map()
+          for (const repo of changeRepos) map.set(repo.name, repo)
+          return map
+        }, [changesData])
+
+        const activeHiddenChangeRepos = useMemo(
+          () => hiddenRepos.filter((name) => changeRepoInfo.has(name)),
+          [hiddenRepos, changeRepoInfo],
+        )
+
         const colors = useMemo(() => {
           const map = new Map()
           for (const repo of repos) map.set(repo.name, PALETTE[paletteIndex(repo.path ?? repo.name)])
+          for (const repo of changeRepos) map.set(repo.name, PALETTE[paletteIndex(repo.path ?? repo.name)])
           return map
-        }, [data])
+        }, [data, changesData])
+
+        /** 汇总改动文件数/增删行数，供模式徽标与摘要栏使用。 */
+        const changeTotals = useMemo(() => {
+          let insertions = 0
+          let deletions = 0
+          let files = 0
+          let dirty = 0
+          let clean = 0
+          for (const repo of changeRepos) {
+            const totals = repo.totals ?? {}
+            if (typeof totals.insertions === 'number') insertions += totals.insertions
+            if (typeof totals.deletions === 'number') deletions += totals.deletions
+            const repoFiles = changeRepoFiles(repo)
+            files += repoFiles
+            const repoError = typeof repo.error === 'string' && repo.error !== ''
+            if (!repoError) {
+              if (repoFiles > 0) dirty += 1
+              else clean += 1
+            }
+          }
+          if (typeof changesData?.totalFiles === 'number') files = changesData.totalFiles
+          if (typeof changesData?.dirtyRepos === 'number') dirty = changesData.dirtyRepos
+          if (typeof changesData?.cleanRepos === 'number') clean = changesData.cleanRepos
+          return { insertions, deletions, files, dirty, clean }
+        }, [changesData])
+
+        /** 改动视图按仓库分组的可见结果：错误仓库在前，再按有改动仓库。 */
+        const changeGroups = useMemo(() => {
+          const needle = query.trim().toLowerCase()
+          const hidden = new Set(activeHiddenChangeRepos)
+          const errors = []
+          const active = []
+          for (const repo of changeRepos) {
+            if (hidden.has(repo.name)) continue
+            const repoError = typeof repo.error === 'string' && repo.error !== ''
+            const repoHit =
+              needle === '' ||
+              String(repo.name).toLowerCase().includes(needle) ||
+              String(repo.path ?? '').toLowerCase().includes(needle)
+            const keep = (file) =>
+              needle === '' || repoHit || String(file.path ?? '').toLowerCase().includes(needle)
+            const lists = {
+              conflicted: (Array.isArray(repo.conflicted) ? repo.conflicted : []).filter(keep),
+              staged: (Array.isArray(repo.staged) ? repo.staged : []).filter(keep),
+              unstaged: (Array.isArray(repo.unstaged) ? repo.unstaged : []).filter(keep),
+              untracked: (Array.isArray(repo.untracked) ? repo.untracked : []).filter(keep),
+            }
+            const visibleFiles =
+              lists.conflicted.length + lists.staged.length + lists.unstaged.length + lists.untracked.length
+            const group = { repo, repoError, ...lists }
+            if (repoError) {
+              if (repoHit) errors.push(group)
+              continue
+            }
+            if (visibleFiles === 0) continue
+            active.push(group)
+          }
+          return [...errors, ...active]
+        }, [changesData, query, activeHiddenChangeRepos])
+
+        const changesBadge = changeTotals.files > 0 ? changeTotals.files : null
 
         const repoPaths = useMemo(() => {
           const map = new Map()
@@ -1199,100 +1515,539 @@ window.__ModuleLoader__.load({
             })
         }, [cwd, t])
 
-        const toolbar = h(
+        /** 切换视图模式并持久化；刷新页面后仍停留在同一模式。 */
+        const switchMode = useCallback((next) => {
+          setMode(next)
+          try {
+            localStorage.setItem(VIEW_MODE_KEY, next)
+          } catch {
+            // 存储不可用时只在当前会话内切换。
+          }
+        }, [])
+
+        const modeSeg = h(
           'div',
-          { className: 'gm-toolbar' },
-          h('div', { className: 'gm-heading' }, h('span', { className: 'gm-heading-text' }, t('title'))),
-          h('div', { className: 'gm-spacer' }),
+          { className: 'gm-mode', role: 'tablist', 'aria-label': t('mode.hint') },
           h(
-            'div',
-            { className: 'gm-seg', role: 'group', title: allBranches ? t('branch.allHint') : t('branch.currentHint') },
-            h(
-              'button',
-              {
-                type: 'button',
-                'aria-pressed': !allBranches,
-                title: t('branch.currentHint'),
-                onClick: () => {
-                  setAllBranches(false)
-                  setExpandedKey(null)
-                },
-              },
-              t('branch.current'),
-            ),
-            h(
-              'button',
-              {
-                type: 'button',
-                'aria-pressed': allBranches,
-                title: t('branch.allHint'),
-                onClick: () => {
-                  setAllBranches(true)
-                  setExpandedKey(null)
-                },
-              },
-              t('branch.all'),
-            ),
+            'button',
+            {
+              type: 'button',
+              role: 'tab',
+              className: 'gm-mode-btn',
+              'aria-selected': mode === 'history',
+              'data-gm-mode': 'history',
+              title: t('mode.historyHint'),
+              onClick: () => switchMode('history'),
+            },
+            t('mode.history'),
           ),
           h(
             'button',
             {
               type: 'button',
-              className: 'gm-tool',
-              title: t('action.fetchHint'),
-              disabled: loading || fetching,
-              onClick: () => {
-                if (repos.length > 0) setConfirmingFetch(true)
-                else runFetch()
-              },
+              role: 'tab',
+              className: 'gm-mode-btn',
+              'aria-selected': mode === 'changes',
+              'data-gm-mode': 'changes',
+              title: t('mode.changesHint'),
+              onClick: () => switchMode('changes'),
             },
-            h(FetchGlyph),
-            fetching ? t('action.fetching') : t('action.fetch'),
-          ),
-          h(
-            'button',
-            {
-              type: 'button',
-              className: 'gm-tool',
-              title: hasCommits ? t('action.gotoHead') : t('action.gotoHeadMissing'),
-              disabled: !hasCommits,
-              onClick: scrollToHead,
-            },
-            h(TargetGlyph),
-            t('action.gotoHead'),
-          ),
-          h(
-            'button',
-            {
-              type: 'button',
-              className: 'gm-tool',
-              title: t('action.gotoTop'),
-              onClick: scrollToTop,
-            },
-            h(TopGlyph),
-            t('action.gotoTop'),
-          ),
-          h(
-            'button',
-            {
-              type: 'button',
-              className: 'gm-tool',
-              title: t('action.refresh'),
-              disabled: loading,
-              onClick: refresh,
-            },
-            h(RefreshGlyph),
-            t('action.refresh'),
+            t('mode.changes'),
+            changesBadge === null ? null : h('span', { className: 'gm-mode-badge' }, String(changesBadge)),
           ),
         )
+
+        const branchSeg = h(
+          'div',
+          { className: 'gm-seg', role: 'group', key: 'branch-seg', title: allBranches ? t('branch.allHint') : t('branch.currentHint') },
+          h(
+            'button',
+            {
+              type: 'button',
+              'aria-pressed': !allBranches,
+              title: t('branch.currentHint'),
+              onClick: () => {
+                setAllBranches(false)
+                setExpandedKey(null)
+              },
+            },
+            t('branch.current'),
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              'aria-pressed': allBranches,
+              title: t('branch.allHint'),
+              onClick: () => {
+                setAllBranches(true)
+                setExpandedKey(null)
+              },
+            },
+            t('branch.all'),
+          ),
+        )
+
+        const fetchButton = h(
+          'button',
+          {
+            type: 'button',
+            className: 'gm-tool',
+            key: 'fetch',
+            title: t('action.fetchHint'),
+            disabled: loading || fetching,
+            onClick: () => {
+              if (repos.length > 0) setConfirmingFetch(true)
+              else runFetch()
+            },
+          },
+          h(FetchGlyph),
+          fetching ? t('action.fetching') : t('action.fetch'),
+        )
+
+        const gotoHeadButton = h(
+          'button',
+          {
+            type: 'button',
+            className: 'gm-tool',
+            key: 'goto-head',
+            title: hasCommits ? t('action.gotoHead') : t('action.gotoHeadMissing'),
+            disabled: !hasCommits,
+            onClick: scrollToHead,
+          },
+          h(TargetGlyph),
+          t('action.gotoHead'),
+        )
+
+        const gotoTopButton = h(
+          'button',
+          {
+            type: 'button',
+            className: 'gm-tool',
+            key: 'goto-top',
+            title: t('action.gotoTop'),
+            onClick: scrollToTop,
+          },
+          h(TopGlyph),
+          t('action.gotoTop'),
+        )
+
+        const refreshButton = h(
+          'button',
+          {
+            type: 'button',
+            className: 'gm-tool',
+            key: 'refresh',
+            title: mode === 'changes' ? t('changes.refreshHint') : t('action.refresh'),
+            disabled: mode === 'history' && loading,
+            onClick: refresh,
+          },
+          h(RefreshGlyph),
+          t('action.refresh'),
+        )
+
+        // 历史模式保留完整工具条；改动模式只留刷新与搜索（搜索在下方 gm-bar 里）。
+        const toolbarChildren = [
+          h('div', { className: 'gm-heading', key: 'heading' }, h('span', { className: 'gm-heading-text' }, t('title'))),
+          modeSeg,
+          h('div', { className: 'gm-spacer', key: 'spacer' }),
+        ]
+        if (mode === 'history') toolbarChildren.push(branchSeg, fetchButton, gotoHeadButton, gotoTopButton)
+        toolbarChildren.push(refreshButton)
+        const toolbar = h('div', { className: 'gm-toolbar' }, toolbarChildren)
+
+        const diffErrorBanner =
+          openDiffError === null
+            ? null
+            : h(
+                'div',
+                { className: 'gm-confirm gm-confirm-error', role: 'alert' },
+                h('span', { className: 'gm-confirm-text' }, text(t, 'diff.openFailed', { message: openDiffError })),
+                h(
+                  'button',
+                  { type: 'button', className: 'gm-tool', onClick: () => setOpenDiffError(null) },
+                  t('fetch.confirmNo'),
+                ),
+              )
 
         if (state.status === 'no-workspace') {
           return h(
             'div',
-            { className: 'gm-root' },
+            { className: 'gm-root', 'data-gm-mode': mode },
             h('style', null, STYLE),
             toolbar,
             h('div', { className: 'gm-status', 'data-gm-state': 'no-workspace' }, t('state.noWorkspace')),
+          )
+        }
+
+        // 工作区改动视图：按仓库分组展示四类改动，与提交历史完全分开渲染。
+        if (mode === 'changes') {
+          const collapsedKeys = new Set(collapsedChangeRepos)
+          const toggleChangeRepo = (key) => {
+            setCollapsedChangeRepos((previous) =>
+              previous.includes(key) ? previous.filter((value) => value !== key) : [...previous, key],
+            )
+          }
+          const renderChangeRow = (repo, scope, file) => {
+            const path = typeof file.path === 'string' ? file.path : ''
+            const rawStatus = typeof file.status === 'string' && file.status !== '' ? file.status.charAt(0) : ''
+            const status = rawStatus !== '' ? rawStatus : scope === 'untracked' ? '?' : '•'
+            const isDirectory = scope === 'untracked' && file.directory === true
+            const disabled = scope === 'conflicted' || isDirectory
+            const slash = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+            const dirPart = slash > 0 ? path.slice(0, slash + 1) : ''
+            const basePart = slash >= 0 ? path.slice(slash + 1) : path
+            const counts = []
+            if ((scope === 'staged' || scope === 'unstaged') && file.binary === true) {
+              counts.push(h('span', { className: 'gm-wt-bin', key: 'bin' }, 'bin'))
+            } else if (scope === 'staged' || scope === 'unstaged') {
+              if (typeof file.insertions === 'number') {
+                counts.push(h('span', { className: 'gm-wt-add', key: 'add' }, `+${file.insertions}`))
+              }
+              if (typeof file.deletions === 'number') {
+                counts.push(h('span', { className: 'gm-wt-del', key: 'del' }, `−${file.deletions}`))
+              }
+            }
+            const activate = () => openChangeDiffSafe(repo.path || repo.name, scope, path)
+            const rowProps = {
+              className: disabled ? 'gm-wt-row gm-wt-row-disabled' : 'gm-wt-row',
+              key: `${scope}:${path}`,
+              'data-gm-wt-file': path,
+              'data-gm-wt-scope': scope,
+            }
+            if (disabled) {
+              rowProps['aria-disabled'] = true
+              rowProps.title =
+                scope === 'conflicted' ? t('changes.conflictUnsupported') : t('changes.directory')
+            } else {
+              rowProps.role = 'button'
+              rowProps.tabIndex = 0
+              rowProps.title = t('changes.openDiff')
+              rowProps.onClick = activate
+              rowProps.onKeyDown = (event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  activate()
+                }
+              }
+            }
+            return h(
+              'div',
+              rowProps,
+              h(
+                'span',
+                { className: /^[A-Z]$/.test(status) ? `gm-wt-status gm-wt-status-${status}` : 'gm-wt-status' },
+                status,
+              ),
+              h(
+                'span',
+                { className: 'gm-wt-path' },
+                dirPart === '' ? null : h('span', { className: 'gm-wt-dir' }, dirPart),
+                h('span', { className: 'gm-wt-file' }, basePart),
+              ),
+              h('span', { className: 'gm-wt-counts' }, counts),
+            )
+          }
+
+          const changeItems = []
+          for (const group of changeGroups) {
+            const repo = group.repo
+            const repoKey = repo.path ?? repo.name
+            const collapsed = collapsedKeys.has(repoKey)
+            const color = colors.get(repo.name) ?? PALETTE[0]
+            const upstream = repo.upstream
+            const totals = repo.totals ?? {}
+            const headChildren = [
+              h(CaretGlyph, { key: 'caret', collapsed }),
+              h('span', { className: 'gm-chip-dot', key: 'dot', style: { background: color } }),
+              h('span', { className: 'gm-wt-name', key: 'name', title: repo.name }, repo.name),
+            ]
+            if (repo.unborn === true) {
+              headChildren.push(h('span', { className: 'gm-badge', key: 'unborn' }, t('changes.unborn')))
+            } else if (typeof repo.branch === 'string' && repo.branch !== '') {
+              headChildren.push(h('span', { className: 'gm-branch', key: 'branch', title: repo.branch }, repo.branch))
+            }
+            headChildren.push(h('span', { className: 'gm-grow', key: 'grow' }))
+            if (upstream !== null && upstream !== undefined) {
+              headChildren.push(
+                h(
+                  'span',
+                  { className: 'gm-wt-track', key: 'track' },
+                  upstream.ahead > 0
+                    ? h(
+                        'span',
+                        { className: 'gm-up', title: text(t, 'upstream.ahead', { count: upstream.ahead }) },
+                        `↑${upstream.ahead}`,
+                      )
+                    : null,
+                  upstream.behind > 0
+                    ? h(
+                        'span',
+                        { className: 'gm-down', title: text(t, 'upstream.behind', { count: upstream.behind }) },
+                        `↓${upstream.behind}`,
+                      )
+                    : null,
+                ),
+              )
+            }
+            headChildren.push(
+              h(
+                'span',
+                { className: 'gm-wt-counts', key: 'totals' },
+                h('span', { className: 'gm-wt-add' }, `+${typeof totals.insertions === 'number' ? totals.insertions : 0}`),
+                h('span', { className: 'gm-wt-del' }, `−${typeof totals.deletions === 'number' ? totals.deletions : 0}`),
+              ),
+              h(
+                'span',
+                { className: 'gm-wt-files', key: 'files' },
+                text(t, 'changes.repoSummary', { files: changeRepoFiles(repo) }),
+              ),
+            )
+            changeItems.push(
+              h(
+                'div',
+                {
+                  className: group.repoError ? 'gm-wt-repo gm-wt-repo-error' : 'gm-wt-repo',
+                  key: repoKey,
+                  'data-gm-wt-repo': repo.name,
+                },
+                h(
+                  'div',
+                  {
+                    className: 'gm-wt-head',
+                    role: 'button',
+                    tabIndex: 0,
+                    'aria-expanded': !collapsed,
+                    title: typeof repo.path === 'string' ? repo.path : repo.name,
+                    onClick: () => toggleChangeRepo(repoKey),
+                    onKeyDown: (event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault()
+                        toggleChangeRepo(repoKey)
+                      }
+                    },
+                  },
+                  headChildren,
+                ),
+                group.repoError
+                  ? h(
+                      'div',
+                      { className: 'gm-wt-error-msg' },
+                      `${t('repo.error')}: ${repo.error}`,
+                    )
+                  : null,
+                !collapsed && group.repoError
+                  ? h('div', { className: 'gm-wt-empty' }, t('changes.empty'))
+                  : null,
+                collapsed
+                  ? null
+                  : ['conflicted', 'staged', 'unstaged', 'untracked'].map((scope) => {
+                      const files = group[scope]
+                      if (!Array.isArray(files) || files.length === 0) return null
+                      const labelKey =
+                        scope === 'conflicted' ? 'changes.conflicted' : WORKTREE_SCOPE_KEYS[scope]
+                      return h(
+                        'div',
+                        { className: 'gm-wt-group', key: `${repoKey}#${scope}`, 'data-gm-wt-group': scope },
+                        h(
+                          'div',
+                          { className: 'gm-wt-group-title' },
+                          t(labelKey),
+                          h('span', { className: 'gm-wt-group-count' }, String(files.length)),
+                        ),
+                        files.map((file) => renderChangeRow(repo, scope, file)),
+                      )
+                    }),
+                !collapsed && !group.repoError && repo.filesTruncated === true
+                  ? h('div', { className: 'gm-wt-note' }, t('changes.repoTruncated'))
+                  : null,
+              ),
+            )
+          }
+
+          const changeChips =
+            changeRepos.length === 0
+              ? null
+              : h(
+                  'div',
+                  { className: 'gm-chips' },
+                  changeRepos.map((repo) => {
+                    const shown = !activeHiddenChangeRepos.includes(repo.name)
+                    const repoError = typeof repo.error === 'string' && repo.error !== ''
+                    const tone = repoError ? ' gm-chip-error' : changeRepoFiles(repo) > 0 ? ' gm-chip-dirty' : ''
+                    return h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: `gm-chip${tone}`,
+                        key: repo.path ?? repo.name,
+                        'aria-pressed': shown,
+                        title: repoError
+                          ? `${repo.name} · ${t('repo.error')}: ${repo.error}`
+                          : `${repo.name} · ${repo.branch ?? ''}`,
+                        onClick: () => toggleRepo(repo.name),
+                      },
+                      h('span', {
+                        className: 'gm-chip-dot',
+                        style: { background: colors.get(repo.name) ?? PALETTE[0] },
+                      }),
+                      repo.name,
+                      repo.upstream === null || repo.upstream === undefined
+                        ? null
+                        : h(
+                            'span',
+                            { className: 'gm-chip-track' },
+                            repo.upstream.ahead > 0
+                              ? h(
+                                  'span',
+                                  { className: 'gm-up', title: text(t, 'upstream.ahead', { count: repo.upstream.ahead }) },
+                                  `↑${repo.upstream.ahead}`,
+                                )
+                              : null,
+                            repo.upstream.behind > 0
+                              ? h(
+                                  'span',
+                                  { className: 'gm-down', title: text(t, 'upstream.behind', { count: repo.upstream.behind }) },
+                                  `↓${repo.upstream.behind}`,
+                                )
+                              : null,
+                          ),
+                    )
+                  }),
+                  activeHiddenChangeRepos.length === 0
+                    ? null
+                    : h(
+                        'button',
+                        { type: 'button', className: 'gm-chip', onClick: () => setHiddenRepos([]) },
+                        t('chip.showAll'),
+                      ),
+                )
+
+          const visibleFileCount = changeGroups.reduce(
+            (sum, group) =>
+              sum +
+              group.conflicted.length +
+              group.staged.length +
+              group.unstaged.length +
+              group.untracked.length,
+            0,
+          )
+          const changesSummaryParts = [
+            h(
+              'span',
+              { className: 'gm-summary-part', key: 'summary' },
+              text(t, 'changes.summary', {
+                repos: changeTotals.dirty,
+                files: changeTotals.files,
+                insertions: changeTotals.insertions,
+                deletions: changeTotals.deletions,
+              }),
+            ),
+          ]
+          if (changeTotals.clean > 0) {
+            changesSummaryParts.push(
+              h(
+                'span',
+                { className: 'gm-summary-part', key: 'clean' },
+                text(t, 'changes.cleanCount', { count: changeTotals.clean }),
+              ),
+            )
+          }
+          if (query.trim() !== '') {
+            changesSummaryParts.push(
+              h(
+                'span',
+                { className: 'gm-summary-part gm-summary-filtered', key: 'filtered' },
+                text(t, 'summary.filtered', { count: visibleFileCount }),
+              ),
+            )
+          }
+
+          const changesWarnings = []
+          if (activeHiddenChangeRepos.length > 0) {
+            changesWarnings.push(
+              h(
+                'span',
+                { className: 'gm-meta', key: 'hidden' },
+                text(t, 'summary.hidden', { count: activeHiddenChangeRepos.length }),
+              ),
+            )
+          }
+          if (changesData?.reposTruncated === true) {
+            changesWarnings.push(
+              h('span', { className: 'gm-meta gm-meta-warn', key: 'repos-truncated' }, t('state.reposTruncated')),
+            )
+          }
+          if ((changesData?.reposSkipped ?? 0) > 0) {
+            changesWarnings.push(
+              h(
+                'span',
+                { className: 'gm-meta gm-meta-warn', key: 'repos-skipped' },
+                text(t, 'state.reposSkipped', { count: changesData.reposSkipped }),
+              ),
+            )
+          }
+          if (changesData?.truncated === true) {
+            changesWarnings.push(
+              h('span', { className: 'gm-meta gm-meta-warn', key: 'truncated' }, t('changes.truncated')),
+            )
+          }
+          if (changesState.status === 'loading' && changesData !== null) {
+            changesWarnings.push(h('span', { className: 'gm-meta', key: 'loading' }, t('changes.loading')))
+          }
+
+          const changesBar = h(
+            'div',
+            { className: 'gm-bar' },
+            h('div', { className: 'gm-meta gm-summary' }, changesData === null ? null : changesSummaryParts),
+            changesWarnings,
+            h(
+              'div',
+              { className: 'gm-search' },
+              h('input', {
+                type: 'search',
+                value: query,
+                placeholder: t('changes.filterPlaceholder'),
+                'aria-label': t('changes.filterPlaceholder'),
+                onChange: (event) => setQuery(event.currentTarget.value),
+              }),
+            ),
+          )
+
+          let changesBody
+          if (changesState.status === 'error') {
+            changesBody = h(
+              'div',
+              { className: 'gm-status gm-status-error', 'data-gm-state': 'error' },
+              text(t, 'changes.error', { message: changesState.failure ?? '' }),
+            )
+          } else if ((changesState.status === 'loading' || changesState.status === 'idle') && changesData === null) {
+            changesBody = h('div', { className: 'gm-status', 'data-gm-state': 'loading' }, t('changes.loading'))
+          } else if (changeRepos.length === 0) {
+            changesBody = h('div', { className: 'gm-status', 'data-gm-state': 'empty' }, t('changes.empty'))
+          } else if (changeGroups.length === 0) {
+            changesBody = h(
+              'div',
+              { className: 'gm-status', 'data-gm-state': query.trim() !== '' ? 'no-match' : 'empty' },
+              query.trim() !== '' ? t('changes.noMatch') : t('changes.empty'),
+            )
+          } else {
+            changesBody = h(
+              'div',
+              { className: 'gm-list gm-changes', 'data-gm-count': changeGroups.length, ref: listRef },
+              changeItems,
+            )
+          }
+
+          return h(
+            'div',
+            { className: 'gm-root', 'data-gm-status': changesState.status, 'data-gm-mode': 'changes' },
+            h('style', null, STYLE),
+            toolbar,
+            diffErrorBanner,
+            changesBar,
+            changeChips,
+            changesBody,
           )
         }
 
@@ -1630,19 +2385,48 @@ window.__ModuleLoader__.load({
         const unknownStatusCount = repos.filter(
           (repo) => repo.dirty === null || repo.dirty === undefined || (typeof repo.error === 'string' && repo.error !== ''),
         ).length
-        const summary = [
-          text(t, 'summary.repos', { count: repos.length }),
-          text(t, 'summary.commits', { count: data?.total ?? 0 }),
-          unknownStatusCount > 0
-            ? text(t, 'summary.unknown', { count: unknownStatusCount })
-            : dirtyCount === 0
-              ? t('summary.clean')
-              : text(t, 'summary.dirty', { count: dirtyCount }),
-        ].join(' · ')
+        const summaryParts = [
+          h('span', { className: 'gm-summary-part', key: 'repos' }, text(t, 'summary.repos', { count: repos.length })),
+          h('span', { className: 'gm-summary-part', key: 'commits' }, text(t, 'summary.commits', { count: data?.total ?? 0 })),
+        ]
+        if (unknownStatusCount > 0) {
+          summaryParts.push(
+            h(
+              'span',
+              { className: 'gm-summary-part', key: 'unknown' },
+              text(t, 'summary.unknown', { count: unknownStatusCount }),
+            ),
+          )
+        } else if (dirtyCount === 0) {
+          summaryParts.push(h('span', { className: 'gm-summary-part', key: 'clean' }, t('summary.clean')))
+        } else {
+          summaryParts.push(
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'gm-summary-part gm-summary-link',
+                key: 'dirty',
+                role: 'button',
+                tabIndex: 0,
+                title: t('mode.changesHint'),
+                'data-gm-dirty-link': 'true',
+                onClick: () => switchMode('changes'),
+                onKeyDown: (event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    switchMode('changes')
+                  }
+                },
+              },
+              text(t, 'summary.dirty', { count: dirtyCount }),
+            ),
+          )
+        }
 
         return h(
           'div',
-          { className: 'gm-root', 'data-gm-status': state.status },
+          { className: 'gm-root', 'data-gm-status': state.status, 'data-gm-mode': 'history' },
           h('style', null, STYLE),
           toolbar,
           confirmingFetch
@@ -1662,22 +2446,11 @@ window.__ModuleLoader__.load({
                 ),
               )
             : null,
-          openDiffError === null
-            ? null
-            : h(
-                'div',
-                { className: 'gm-confirm gm-confirm-error', role: 'alert' },
-                h('span', { className: 'gm-confirm-text' }, text(t, 'diff.openFailed', { message: openDiffError })),
-                h(
-                  'button',
-                  { type: 'button', className: 'gm-tool', onClick: () => setOpenDiffError(null) },
-                  t('fetch.confirmNo'),
-                ),
-              ),
+          diffErrorBanner,
           h(
             'div',
             { className: 'gm-bar' },
-            h('div', { className: 'gm-meta' }, data === null ? null : h('span', null, summary)),
+            h('div', { className: 'gm-meta gm-summary' }, data === null ? null : summaryParts),
             query.trim() !== '' ? h('span', { className: 'gm-meta' }, text(t, 'summary.filtered', { count: items.length })) : null,
             activeHiddenRepos.length > 0
               ? h('span', { className: 'gm-meta' }, text(t, 'summary.hidden', { count: activeHiddenRepos.length }))
@@ -1779,6 +2552,11 @@ window.__ModuleLoader__.load({
         ctx.sidebarRight.openTab(DIFF_KIND, { params: { repo, hash, file } })
       }
 
+      /** 在右侧栏打开一个工作区改动文件的差异页签（同一 diff kind，附加 scope）。 */
+      const openWorktreeDiff = (repo, scope, file) => {
+        ctx.sidebarRight.openTab(DIFF_KIND, { params: { repo, scope, file } })
+      }
+
       register('git-multirepo: diff type', () => ctx.sidebarRightTabs.register(diffDefinition(t)))
       register('git-multirepo: diff body', () =>
         ctx.slots.inject('sidebar.right.pane.tab', () =>
@@ -1802,7 +2580,7 @@ window.__ModuleLoader__.load({
               order: 20,
               label: () => t('view.label'),
             },
-            createView(t, openDiff),
+            createView(t, openDiff, openWorktreeDiff),
           ),
         ),
       )
