@@ -1,5 +1,4 @@
 import { execFile } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
 import { accessSync, constants as fsConstants, existsSync, lstatSync, realpathSync, statSync, readFileSync } from 'node:fs'
 import { opendir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -17,8 +16,6 @@ const ROUTE_PATCH = '/api/git-multirepo/patch'
 const ROUTE_WORKTREE = '/api/git-multirepo/worktree'
 /** 未提交单个文件的差异路由。 */
 const ROUTE_WORKTREE_DIFF = '/api/git-multirepo/worktree-diff'
-/** 把提交解释请求转成当前会话用户消息的路由。 */
-const ROUTE_CHAT = '/api/git-multirepo/chat'
 /**
  * git 输出字段分隔符，由格式串里的 %x00 产生。
  * NUL 不会出现在提交对象、引用名或路径中，因此提交内容无法用它伪造字段或记录。
@@ -131,8 +128,6 @@ const MAX_CHANGE_ENTRIES = 2000
 const UNTRACKED_READ_LIMIT = 512 * 1024
 /** 工具结果渲染为模型文本时的字符上限。 */
 const TOOL_TEXT_LIMIT = 20000
-/** 添加到对话时最多附带多少个变更文件。 */
-const CHAT_FILE_LIMIT = 30
 /** 模型可见的 git 工具使用说明，保持简短以免挤占上下文。 */
 const AGENT_GUIDANCE = 'Git workspace tools: git_multirepo_state, git_multirepo_changes, git_multirepo_commit, git_multirepo_commit_diff and git_multirepo_change_diff are read-only viewers over the session workspace. Use them when the user asks about repository status, commits, diffs or uncommitted changes instead of raw git commands. They never fetch, merge or modify files.'
 
@@ -2000,59 +1995,6 @@ function registerAgentSurface(ctx) {
 }
 
 /**
- * 把“解释这个提交”追加为当前会话的下一条用户消息。
- * 消息由 Host 组装，携带仓库、提交与变更文件；Agent 用只读工具读取细节。
- * @param {Request} request 已鉴权请求。
- * @param {any} ctx cordis 上下文。
- */
-async function handleChat(request, ctx) {
-  const url = new URL(request.url)
-  const sessionId = url.searchParams.get('session') ?? ''
-  const requested = url.searchParams.get('repo')
-  const repo = resolveWorkspaceRoot(requested)
-  const hash = url.searchParams.get('hash') ?? ''
-  if (sessionId === '' || sessionId.length > 200) return jsonResponse(400, { error: 'invalid-session' })
-  if (repo === null) return jsonResponse(400, { error: 'invalid-repo', repo: requested ?? '' })
-  if (!isInsideWorkspace(ctx, repo)) return jsonResponse(403, { error: 'outside-workspace', repo })
-  if (!REQUEST_HASH.test(hash)) return jsonResponse(400, { error: 'invalid-hash', hash })
-
-  const detailResponse = await handleCommit(internalRequest(ROUTE_COMMIT, { repo, hash }, request.signal), ctx)
-  const detail = await detailResponse.json()
-  if (!detailResponse.ok) return detailResponse
-
-  const agents = typeof ctx.get === 'function' ? ctx.get('agents', false) : ctx.agents
-  const agent = agents?.get?.(sessionId)
-  if (!agent || typeof agent.followup !== 'function') return jsonResponse(503, { error: 'agent-unavailable' })
-
-  const files = Array.isArray(detail.files) ? detail.files.slice(0, CHAT_FILE_LIMIT) : []
-  const lines = [
-    '请解释下面这个提交的改动。可以用 git_multirepo_commit 和 git_multirepo_commit_diff 读取完整细节。',
-    '',
-    `仓库：${path.basename(repo)}`,
-    `路径：${repo}`,
-    `提交：${detail.short ?? hash}`,
-    `标题：${detail.subject ?? ''}`,
-  ]
-  if (files.length > 0) {
-    lines.push('涉及文件：')
-    for (const file of files) lines.push(`- ${file.status} ${file.path}`)
-    if (detail.filesTruncated === true) lines.push('- …（文件列表已截断）')
-  }
-  const message = {
-    id: randomUUID(),
-    role: 'user',
-    content: [{ type: 'text', text: lines.join('\n') }],
-    source: { kind: 'user' },
-  }
-  try {
-    await agent.followup(message)
-  } catch {
-    return jsonResponse(500, { error: 'chat-failed' })
-  }
-  return jsonResponse(200, { status: 'queued', session: sessionId, repo, hash: detail.hash ?? hash })
-}
-
-/**
  * Host 半：在 Connection 的 authenticated exact route registry 上注册接口。
  * @param {any} ctx cordis 上下文。
  */
@@ -2116,16 +2058,6 @@ export function apply(ctx) {
         fetch: (request) => runRequest(request, ctx, handleWorktreeDiff),
       }),
     'git-multirepo: worktree diff route',
-  )
-  ctx.effect(
-    () =>
-      ctx.connection.fetch.register({
-        path: ROUTE_CHAT,
-        methods: ['POST'],
-        requestBody: 'buffered',
-        fetch: (request) => runRequest(request, ctx, handleChat),
-      }),
-    'git-multirepo: chat route',
   )
   registerAgentSurface(ctx)
 }

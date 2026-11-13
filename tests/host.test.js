@@ -722,37 +722,6 @@ test('agent tools expose read-only state, changes, commits and diffs', async () 
   )
 })
 
-test('chat route queues a user message carrying repository, commit and changed files', async () => {
-  const repo = fixture()
-  const messages = []
-  const agents = {
-    get: (sessionId) => sessionId === 'session-a'
-      ? { followup: async (message) => { messages.push(message); return { queued: true } } }
-      : undefined,
-  }
-  const host = hostWithAgent([repo], { agents })
-  const state = await host.call('state', { root: repo })
-  const commit = state.data.commits[0]
-
-  const queued = await host.call('chat', { session: 'session-a', repo, hash: commit.hash }, { method: 'POST' })
-  assert.equal(queued.status, 200)
-  assert.equal(queued.data.status, 'queued')
-  assert.equal(messages.length, 1)
-  const message = messages[0]
-  assert.equal(message.role, 'user')
-  assert.equal(message.source.kind, 'user')
-  assert.equal(typeof message.id, 'string')
-  const messageText = message.content[0].text
-  assert.ok(messageText.includes(path.basename(repo)))
-  assert.ok(messageText.includes(commit.hash.slice(0, 7)))
-  assert.ok(messageText.includes('file.txt'))
-
-  const missingAgent = await host.call('chat', { session: 'session-b', repo, hash: commit.hash }, { method: 'POST' })
-  assert.equal(missingAgent.status, 503)
-  const outsideWorkspace = await host.call('chat', { session: 'session-a', repo: path.dirname(repo), hash: commit.hash }, { method: 'POST' })
-  assert.equal(outsideWorkspace.status, 403)
-})
-
 test('workspace roots using Windows 8.3 short paths resolve like Git long paths', async () => {
   if (process.platform !== 'win32') return
   const longContainer = path.join(root, 'short-path-alias-container')
