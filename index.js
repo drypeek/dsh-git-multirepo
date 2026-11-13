@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { accessSync, constants as fsConstants, existsSync, lstatSync, realpathSync, statSync, readFileSync } from 'node:fs'
 import { opendir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -16,6 +17,8 @@ const ROUTE_PATCH = '/api/git-multirepo/patch'
 const ROUTE_WORKTREE = '/api/git-multirepo/worktree'
 /** 未提交单个文件的差异路由。 */
 const ROUTE_WORKTREE_DIFF = '/api/git-multirepo/worktree-diff'
+/** 把提交解释请求转成当前会话用户消息的路由。 */
+const ROUTE_CHAT = '/api/git-multirepo/chat'
 /**
  * git 输出字段分隔符，由格式串里的 %x00 产生。
  * NUL 不会出现在提交对象、引用名或路径中，因此提交内容无法用它伪造字段或记录。
@@ -126,6 +129,12 @@ const WORKTREE_CACHE_BYTE_LIMIT = 8 * 1024 * 1024
 const MAX_CHANGE_ENTRIES = 2000
 /** 未跟踪文件预览的最大读取字节数。 */
 const UNTRACKED_READ_LIMIT = 512 * 1024
+/** 工具结果渲染为模型文本时的字符上限。 */
+const TOOL_TEXT_LIMIT = 20000
+/** 添加到对话时最多附带多少个变更文件。 */
+const CHAT_FILE_LIMIT = 30
+/** 模型可见的 git 工具使用说明，保持简短以免挤占上下文。 */
+const AGENT_GUIDANCE = 'Git workspace tools: git_multirepo_state, git_multirepo_changes, git_multirepo_commit, git_multirepo_commit_diff and git_multirepo_change_diff are read-only viewers over the session workspace. Use them when the user asks about repository status, commits, diffs or uncommitted changes instead of raw git commands. They never fetch, merge or modify files.'
 
 /** 工作区状态缓存，键为根目录加查询条件。 */
 const stateCache = new Map()
@@ -1694,6 +1703,355 @@ async function handleWorktreeDiff(request, ctx) {
   return jsonResponse(200, { scope, file, ...parseUnifiedDiff(result.stdout) })
 }
 
+/** 工具复用的内部只读处理器，键与路由一一对应。 */
+const INTERNAL_READ_ROUTES = {
+  [ROUTE_STATE]: handleState,
+  [ROUTE_COMMIT]: handleCommit,
+  [ROUTE_PATCH]: handlePatch,
+  [ROUTE_WORKTREE]: handleWorktree,
+  [ROUTE_WORKTREE_DIFF]: handleWorktreeDiff,
+}
+
+/**
+ * 构造内部查询请求，复用既有路由处理器。
+ * @param {string} route 路由。
+ * @param {Record<string, string>} params 查询参数。
+ * @param {AbortSignal} [signal] 取消信号。
+ */
+function internalRequest(route, params, signal) {
+  return new Request(`http://127.0.0.1${route}?${new URLSearchParams(params).toString()}`, { signal })
+}
+
+/**
+ * 复用只读处理器执行一次内部查询；非 2xx 响应转成工具错误。
+ * @param {string} route 只读路由。
+ * @param {Record<string, string>} params 查询参数。
+ * @param {any} ctx cordis 上下文。
+ * @param {AbortSignal} [signal] 取消信号。
+ */
+async function internalJson(route, params, ctx, signal) {
+  const handler = INTERNAL_READ_ROUTES[route]
+  const response = await handler(internalRequest(route, params, signal), ctx)
+  const value = await response.json()
+  if (!response.ok) {
+    const error = typeof value?.error === 'string' ? value.error : 'request-failed'
+    throw new Error(`${error}: ${route}`)
+  }
+  return value
+}
+
+/** 把工具参数的整数裁剪到安全范围。 */
+function toolInt(value, fallback, min, max) {
+  const number = Math.floor(Number(value))
+  if (!Number.isFinite(number)) return fallback
+  return Math.min(Math.max(number, min), max)
+}
+
+/** 工具默认使用会话工作区；显式 root 同样必须落在已注册工作区内（由处理器校验）。 */
+function toolRoot(value, exec) {
+  const fallback = exec?.agent?.session?.header?.cwd
+  const candidate = typeof value === 'string' && value.trim() !== '' ? value : fallback
+  if (typeof candidate !== 'string' || candidate === '') return null
+  return resolveWorkspaceRoot(candidate)
+}
+
+/** 仓库摘要，去掉体积大且与决策无关的字段。 */
+function compactRepo(repo) {
+  return {
+    name: repo.name,
+    path: repo.path,
+    branch: repo.branch,
+    dirty: repo.dirty,
+    upstream: repo.upstream ?? null,
+    error: repo.error ?? null,
+  }
+}
+
+/** 提交摘要。 */
+function compactCommit(commit) {
+  return {
+    repo: commit.repo,
+    hash: commit.hash,
+    short: commit.short,
+    author: commit.author,
+    date: commit.date,
+    subject: commit.subject,
+    refs: commit.refs,
+  }
+}
+
+/** 工作区改动文件摘要。 */
+function compactChangeFile(file) {
+  const value = { path: file.path, status: file.status }
+  if (typeof file.insertions === 'number') value.insertions = file.insertions
+  if (typeof file.deletions === 'number') value.deletions = file.deletions
+  if (file.binary === true) value.binary = true
+  if (file.directory === true) value.directory = true
+  return value
+}
+
+/** 工作区改动仓库摘要。 */
+function compactChangeRepo(repo) {
+  return {
+    name: repo.name,
+    path: repo.path,
+    branch: repo.branch,
+    upstream: repo.upstream ?? null,
+    unborn: repo.unborn === true,
+    error: repo.error ?? null,
+    totals: repo.totals,
+    filesTruncated: repo.filesTruncated === true,
+    conflicted: repo.conflicted.map(compactChangeFile),
+    staged: repo.staged.map(compactChangeFile),
+    unstaged: repo.unstaged.map(compactChangeFile),
+    untracked: repo.untracked.map(compactChangeFile),
+  }
+}
+
+/** 工具的统一 JSON 输出声明。 */
+const TOOL_OUTPUT = {
+  schema: { type: 'object', additionalProperties: true },
+  render: (_args, value) => {
+    const text = JSON.stringify(value, null, 2)
+    return [{ type: 'text', text: text.length <= TOOL_TEXT_LIMIT ? text : `${text.slice(0, TOOL_TEXT_LIMIT)}\n… (truncated)` }]
+  },
+}
+
+/**
+ * 构造只读 git 工具；工具直接复用 Host 的只读处理器，因此边界与 UI 完全一致。
+ * @param {any} ctx cordis 上下文。
+ */
+function agentToolDefinitions(ctx) {
+  return [
+    {
+      name: 'git_multirepo_state',
+      description: 'Read-only overview of the Git repositories in the session workspace: branch, working-tree dirty flag, upstream ahead/behind and recent commits. Prefer this over raw git commands when the user asks about repository status or history.',
+      parameters: {
+        type: 'object',
+        properties: {
+          root: { type: 'string', description: 'Absolute workspace root; defaults to the session working directory.' },
+          limit: { type: 'number', description: 'Commits per repository, 1-100 (default 20).' },
+        },
+      },
+      output: TOOL_OUTPUT,
+      async execute(args, exec) {
+        const root = toolRoot(args?.root, exec)
+        if (root === null) throw new Error('invalid-root: no workspace root in this session')
+        const value = await internalJson(ROUTE_STATE, {
+          root,
+          limit: String(toolInt(args?.limit, 20, 1, 100)),
+          all: '0',
+        }, ctx, exec.signal)
+        return {
+          root: value.root,
+          repos: value.repos.map(compactRepo),
+          commits: value.commits.slice(0, 200).map(compactCommit),
+          total: value.total,
+          truncated: value.truncated === true,
+          reposTruncated: value.reposTruncated === true,
+          reposSkipped: value.reposSkipped ?? 0,
+        }
+      },
+    },
+    {
+      name: 'git_multirepo_changes',
+      description: 'Read-only list of staged, unstaged, untracked and conflicted files across every repository in the session workspace, with per-file line counts. Use it before explaining or reviewing uncommitted work.',
+      parameters: {
+        type: 'object',
+        properties: {
+          root: { type: 'string', description: 'Absolute workspace root; defaults to the session working directory.' },
+          depth: { type: 'number', description: 'Directory scan depth, 1-10 (default 4).' },
+        },
+      },
+      output: TOOL_OUTPUT,
+      async execute(args, exec) {
+        const root = toolRoot(args?.root, exec)
+        if (root === null) throw new Error('invalid-root: no workspace root in this session')
+        const value = await internalJson(ROUTE_WORKTREE, {
+          root,
+          depth: String(toolInt(args?.depth, 4, 1, 10)),
+        }, ctx, exec.signal)
+        return {
+          root: value.root,
+          totalRepos: value.totalRepos,
+          dirtyRepos: value.dirtyRepos,
+          cleanRepos: value.cleanRepos,
+          totalFiles: value.totalFiles,
+          truncated: value.truncated === true,
+          reposTruncated: value.reposTruncated === true,
+          reposSkipped: value.reposSkipped ?? 0,
+          repos: value.repos.map(compactChangeRepo),
+        }
+      },
+    },
+    {
+      name: 'git_multirepo_commit',
+      description: 'Read one commit of a repository in the workspace: message, author, parents and the changed-file list with line counts. Read-only.',
+      parameters: {
+        type: 'object',
+        properties: {
+          repo: { type: 'string', description: 'Absolute repository path (as returned by git_multirepo_state).' },
+          hash: { type: 'string', description: 'Commit hash.' },
+        },
+        required: ['repo', 'hash'],
+      },
+      output: TOOL_OUTPUT,
+      async execute(args, exec) {
+        const repo = resolveWorkspaceRoot(args?.repo)
+        if (repo === null) throw new Error('invalid-repo')
+        const value = await internalJson(ROUTE_COMMIT, { repo, hash: String(args?.hash ?? '') }, ctx, exec.signal)
+        return {
+          repo,
+          hash: value.hash,
+          short: value.short,
+          subject: value.subject,
+          body: truncate(value.body ?? '', 4000),
+          author: value.author,
+          committer: value.committer,
+          parents: value.parents,
+          refs: value.refs,
+          stat: value.stat,
+          files: value.files.slice(0, 200),
+          filesTruncated: value.filesTruncated === true || value.files.length > 200,
+        }
+      },
+    },
+    {
+      name: 'git_multirepo_commit_diff',
+      description: 'Read the unified diff of one file in a commit. Read-only; the diff is bounded and reports truncation.',
+      parameters: {
+        type: 'object',
+        properties: {
+          repo: { type: 'string', description: 'Absolute repository path.' },
+          hash: { type: 'string', description: 'Commit hash.' },
+          file: { type: 'string', description: 'Repository-relative file path.' },
+        },
+        required: ['repo', 'hash', 'file'],
+      },
+      output: TOOL_OUTPUT,
+      async execute(args, exec) {
+        const repo = resolveWorkspaceRoot(args?.repo)
+        if (repo === null) throw new Error('invalid-repo')
+        const file = String(args?.file ?? '')
+        const fileError = safeRelativePath(file)
+        if (fileError !== null) throw new Error(fileError)
+        return internalJson(ROUTE_PATCH, { repo, hash: String(args?.hash ?? ''), file }, ctx, exec.signal)
+      },
+    },
+    {
+      name: 'git_multirepo_change_diff',
+      description: 'Read the unified diff of one uncommitted file: scope staged, unstaged or untracked. Read-only; untracked files are synthesized locally with a size limit.',
+      parameters: {
+        type: 'object',
+        properties: {
+          repo: { type: 'string', description: 'Absolute repository path.' },
+          scope: { type: 'string', description: 'One of staged, unstaged, untracked.' },
+          file: { type: 'string', description: 'Repository-relative file path.' },
+        },
+        required: ['repo', 'scope', 'file'],
+      },
+      output: TOOL_OUTPUT,
+      async execute(args, exec) {
+        const repo = resolveWorkspaceRoot(args?.repo)
+        if (repo === null) throw new Error('invalid-repo')
+        const scope = String(args?.scope ?? '')
+        if (!WORKTREE_SCOPES.has(scope)) throw new Error('invalid-scope')
+        const file = String(args?.file ?? '')
+        const fileError = safeRelativePath(file)
+        if (fileError !== null) throw new Error(fileError)
+        return internalJson(ROUTE_WORKTREE_DIFF, { repo, scope, file }, ctx, exec.signal)
+      },
+    },
+  ]
+}
+
+/** 工作区改动范围集合。 */
+const WORKTREE_SCOPES = new Set(['staged', 'unstaged', 'untracked'])
+
+/**
+ * 只读工具与使用说明只在宿主提供相应服务时注册；旧宿主上静默跳过，不影响插件加载。
+ * @param {any} ctx cordis 上下文。
+ */
+function registerAgentSurface(ctx) {
+  if (typeof ctx.inject !== 'function') return
+  ctx.inject(['tools'], (injected) => {
+    const register = () => {
+      const tools = injected.get('tools')
+      const disposers = agentToolDefinitions(ctx).map((tool) => tools.register(tool))
+      return () => {
+        for (const dispose of disposers) if (typeof dispose === 'function') dispose()
+      }
+    }
+    if (typeof injected.effect === 'function') injected.effect(register, 'git-multirepo: agent tools')
+    else ctx.effect(register, 'git-multirepo: agent tools')
+  })
+  ctx.inject(['systemPrompt'], (injected) => {
+    const register = () => {
+      const dispose = injected.get('systemPrompt').section({
+        name: 'git-multirepo/usage',
+        order: 150,
+        text: () => AGENT_GUIDANCE,
+      })
+      return typeof dispose === 'function' ? dispose : undefined
+    }
+    if (typeof injected.effect === 'function') injected.effect(register, 'git-multirepo: agent guidance')
+    else ctx.effect(register, 'git-multirepo: agent guidance')
+  })
+}
+
+/**
+ * 把“解释这个提交”追加为当前会话的下一条用户消息。
+ * 消息由 Host 组装，携带仓库、提交与变更文件；Agent 用只读工具读取细节。
+ * @param {Request} request 已鉴权请求。
+ * @param {any} ctx cordis 上下文。
+ */
+async function handleChat(request, ctx) {
+  const url = new URL(request.url)
+  const sessionId = url.searchParams.get('session') ?? ''
+  const requested = url.searchParams.get('repo')
+  const repo = resolveWorkspaceRoot(requested)
+  const hash = url.searchParams.get('hash') ?? ''
+  if (sessionId === '' || sessionId.length > 200) return jsonResponse(400, { error: 'invalid-session' })
+  if (repo === null) return jsonResponse(400, { error: 'invalid-repo', repo: requested ?? '' })
+  if (!isInsideWorkspace(ctx, repo)) return jsonResponse(403, { error: 'outside-workspace', repo })
+  if (!REQUEST_HASH.test(hash)) return jsonResponse(400, { error: 'invalid-hash', hash })
+
+  const detailResponse = await handleCommit(internalRequest(ROUTE_COMMIT, { repo, hash }, request.signal), ctx)
+  const detail = await detailResponse.json()
+  if (!detailResponse.ok) return detailResponse
+
+  const agents = typeof ctx.get === 'function' ? ctx.get('agents', false) : ctx.agents
+  const agent = agents?.get?.(sessionId)
+  if (!agent || typeof agent.followup !== 'function') return jsonResponse(503, { error: 'agent-unavailable' })
+
+  const files = Array.isArray(detail.files) ? detail.files.slice(0, CHAT_FILE_LIMIT) : []
+  const lines = [
+    '请解释下面这个提交的改动。可以用 git_multirepo_commit 和 git_multirepo_commit_diff 读取完整细节。',
+    '',
+    `仓库：${path.basename(repo)}`,
+    `路径：${repo}`,
+    `提交：${detail.short ?? hash}`,
+    `标题：${detail.subject ?? ''}`,
+  ]
+  if (files.length > 0) {
+    lines.push('涉及文件：')
+    for (const file of files) lines.push(`- ${file.status} ${file.path}`)
+    if (detail.filesTruncated === true) lines.push('- …（文件列表已截断）')
+  }
+  const message = {
+    id: randomUUID(),
+    role: 'user',
+    content: [{ type: 'text', text: lines.join('\n') }],
+    source: { kind: 'user' },
+  }
+  try {
+    await agent.followup(message)
+  } catch {
+    return jsonResponse(500, { error: 'chat-failed' })
+  }
+  return jsonResponse(200, { status: 'queued', session: sessionId, repo, hash: detail.hash ?? hash })
+}
+
 /**
  * Host 半：在 Connection 的 authenticated exact route registry 上注册接口。
  * @param {any} ctx cordis 上下文。
@@ -1759,4 +2117,15 @@ export function apply(ctx) {
       }),
     'git-multirepo: worktree diff route',
   )
+  ctx.effect(
+    () =>
+      ctx.connection.fetch.register({
+        path: ROUTE_CHAT,
+        methods: ['POST'],
+        requestBody: 'buffered',
+        fetch: (request) => runRequest(request, ctx, handleChat),
+      }),
+    'git-multirepo: chat route',
+  )
+  registerAgentSurface(ctx)
 }
