@@ -49,6 +49,37 @@ function host(roots) {
     return { status: response.status, data: await response.json() }
   }
 }
+
+/** 带 Agent 服务（tools / systemPrompt / agents）的 Host 桩，用于验证 AI 集成。 */
+function hostWithAgent(roots, options = {}) {
+  const routes = new Map()
+  const tools = new Map()
+  const sections = []
+  const context = {
+    effect: (start) => start(),
+    inject: (_deps, callback) => callback({
+      get: (name) => context[name],
+      effect: (start) => start(),
+    }),
+    workspaceRegistry: { list: () => roots.map((p) => ({ path: p })) },
+    connection: { fetch: { register: (route) => { routes.set(route.path, route.fetch); return () => {} } } },
+    tools: {
+      register: (tool) => {
+        tools.set(tool.name, tool)
+        return () => tools.delete(tool.name)
+      },
+    },
+    systemPrompt: { section: (value) => { sections.push(value); return () => {} } },
+    agents: options.agents ?? { get: () => undefined },
+  }
+  context.get = (name) => context[name]
+  apply(context)
+  const call = async (name, params, requestOptions = {}) => {
+    const response = await routes.get(`/api/git-multirepo/${name}`)(new Request(`http://localhost/api/git-multirepo/${name}?${new URLSearchParams(params)}`, requestOptions))
+    return { status: response.status, data: await response.json() }
+  }
+  return { call, tools, sections }
+}
 const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`
 function trap(repo) {
   const marker = path.join(repo, 'executed-marker')
@@ -650,6 +681,76 @@ test('worktree handles spaces, unicode and bracket filenames with literal pathsp
     assert.equal(diff.data.additions, 1, name)
     assert.deepEqual(diff.data.hunks[0].lines, [{ type: 'add', text: 'x' }])
   }
+})
+
+test('agent tools expose read-only state, changes, commits and diffs', async () => {
+  const repo = fixture()
+  const host = hostWithAgent([repo])
+  assert.deepEqual([...host.tools.keys()].sort(), [
+    'git_multirepo_change_diff',
+    'git_multirepo_changes',
+    'git_multirepo_commit',
+    'git_multirepo_commit_diff',
+    'git_multirepo_state',
+  ])
+  assert.equal(host.sections.length, 1)
+  assert.match(host.sections[0].text(), /read-only/i)
+
+  const exec = { signal: new AbortController().signal, agent: { session: { header: { cwd: repo } } } }
+  const state = await host.tools.get('git_multirepo_state').execute({}, exec)
+  assert.equal(state.repos.length, 1)
+  assert.equal(state.repos[0].path, repo)
+  assert.notEqual(state.repos[0].branch, '')
+  assert.equal(state.repos[0].dirty, false)
+  const commit = state.commits[0]
+  assert.ok(commit?.hash)
+
+  const changes = await host.tools.get('git_multirepo_changes').execute({}, exec)
+  assert.equal(changes.repos.length, 0, 'clean fixture has no working-tree changes')
+
+  const detail = await host.tools.get('git_multirepo_commit').execute({ repo, hash: commit.hash }, exec)
+  assert.equal(detail.hash, commit.hash)
+  assert.ok(detail.files.length >= 1)
+
+  const diff = await host.tools.get('git_multirepo_commit_diff').execute({ repo, hash: commit.hash, file: 'file.txt' }, exec)
+  assert.equal(diff.file, 'file.txt')
+  assert.ok(diff.additions >= 1)
+
+  await assert.rejects(
+    host.tools.get('git_multirepo_commit').execute({ repo: path.dirname(repo), hash: commit.hash }, exec),
+    /invalid-repo|outside-workspace/,
+  )
+})
+
+test('chat route queues a user message carrying repository, commit and changed files', async () => {
+  const repo = fixture()
+  const messages = []
+  const agents = {
+    get: (sessionId) => sessionId === 'session-a'
+      ? { followup: async (message) => { messages.push(message); return { queued: true } } }
+      : undefined,
+  }
+  const host = hostWithAgent([repo], { agents })
+  const state = await host.call('state', { root: repo })
+  const commit = state.data.commits[0]
+
+  const queued = await host.call('chat', { session: 'session-a', repo, hash: commit.hash }, { method: 'POST' })
+  assert.equal(queued.status, 200)
+  assert.equal(queued.data.status, 'queued')
+  assert.equal(messages.length, 1)
+  const message = messages[0]
+  assert.equal(message.role, 'user')
+  assert.equal(message.source.kind, 'user')
+  assert.equal(typeof message.id, 'string')
+  const messageText = message.content[0].text
+  assert.ok(messageText.includes(path.basename(repo)))
+  assert.ok(messageText.includes(commit.hash.slice(0, 7)))
+  assert.ok(messageText.includes('file.txt'))
+
+  const missingAgent = await host.call('chat', { session: 'session-b', repo, hash: commit.hash }, { method: 'POST' })
+  assert.equal(missingAgent.status, 503)
+  const outsideWorkspace = await host.call('chat', { session: 'session-a', repo: path.dirname(repo), hash: commit.hash }, { method: 'POST' })
+  assert.equal(outsideWorkspace.status, 403)
 })
 
 test('workspace roots using Windows 8.3 short paths resolve like Git long paths', async () => {
