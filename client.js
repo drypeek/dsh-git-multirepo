@@ -363,8 +363,10 @@ window.__ModuleLoader__.load({
 .gm-dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:6px}
 .gm-dialog-btn{height:30px;padding:0 13px;border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-sm,4px);background:0 0;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;cursor:pointer}
 .gm-dialog-btn:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.16))}
-.gm-dialog-btn-primary{border-color:var(--dsw-alias-brand-primary);background:color-mix(in srgb,var(--dsw-alias-brand-primary) 14%,transparent);color:var(--dsw-alias-brand-primary);font-weight:600}
-.gm-dialog-btn-primary:hover{background:color-mix(in srgb,var(--dsw-alias-brand-primary) 22%,transparent)}
+.gm-dialog-btn:focus{outline:none}
+.gm-dialog-btn:focus-visible{outline:2px solid color-mix(in srgb,var(--dsw-alias-brand-primary) 30%,transparent);outline-offset:2px}
+.gm-dialog-btn-primary{border-color:transparent;background:color-mix(in srgb,var(--dsw-alias-brand-primary) 11%,transparent);color:var(--dsw-alias-brand-primary);font-weight:600}
+.gm-dialog-btn-primary:hover{background:color-mix(in srgb,var(--dsw-alias-brand-primary) 17%,transparent)}
 .gm-fetch-toast{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:1000;display:flex;align-items:flex-start;gap:10px;width:min(560px,calc(100vw - 32px));box-sizing:border-box;padding:12px 14px;border:.5px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-base);box-shadow:0 8px 24px rgba(0,0,0,.18);font-size:12px;color:var(--dsw-alias-label-primary)}
 .gm-fetch-toast-ok{border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary) 55%,transparent)}
 .gm-fetch-toast-partial{border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 55%,transparent)}
