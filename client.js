@@ -55,6 +55,11 @@ window.__ModuleLoader__.load({
       'fetch.ok': '已拉取 {count} 个仓库',
       'fetch.partial': '已拉取，{count} 个仓库失败',
       'fetch.error': '拉取请求失败：{message}',
+      'fetch.doneTitle': '拉取完成',
+      'fetch.partialTitle': '部分仓库拉取失败',
+      'fetch.errorTitle': '拉取失败',
+      'fetch.timeoutTitle': '拉取超时',
+      'fetch.dismiss': '关闭',
       'upstream.ahead': '领先远程 {count} 个提交（本地未推送）',
       'upstream.behind': '落后远程 {count} 个提交（需要拉取）',
       'branch.current': '当前分支',
@@ -119,6 +124,7 @@ window.__ModuleLoader__.load({
       'diff.missingParams': '差异页签缺少定位参数，请回到提交详情重新打开。',
       'diff.openFailed': '打开差异页签失败：{message}',
       'fetch.confirm': '将对 {count} 个仓库执行 git fetch（只更新远程跟踪引用，不会合并或改动工作区文件）。继续？',
+      'fetch.confirmTitle': '拉取远程更新？',
       'fetch.confirmYes': '开始拉取',
       'fetch.confirmNo': '取消',
       'fetch.timedOut': '拉取超时，已停止剩余仓库',
@@ -186,6 +192,11 @@ window.__ModuleLoader__.load({
       'fetch.ok': 'Fetched {count} repositories',
       'fetch.partial': 'Fetched, {count} failed',
       'fetch.error': 'Fetch request failed: {message}',
+      'fetch.doneTitle': 'Fetch complete',
+      'fetch.partialTitle': 'Fetch completed with failures',
+      'fetch.errorTitle': 'Fetch failed',
+      'fetch.timeoutTitle': 'Fetch timed out',
+      'fetch.dismiss': 'Dismiss',
       'upstream.ahead': '{count} commits ahead of upstream (not pushed)',
       'upstream.behind': '{count} commits behind upstream (needs fetch)',
       'branch.current': 'Current branch',
@@ -250,6 +261,7 @@ window.__ModuleLoader__.load({
       'diff.missingParams': 'Diff tab is missing its target; reopen it from the commit detail.',
       'diff.openFailed': 'Cannot open the diff tab: {message}',
       'fetch.confirm': 'Run git fetch on {count} repositories? Only remote-tracking refs are updated; nothing is merged and no working-tree file is changed.',
+      'fetch.confirmTitle': 'Fetch remote updates?',
       'fetch.confirmYes': 'Start fetch',
       'fetch.confirmNo': 'Cancel',
       'fetch.timedOut': 'Fetch timed out; remaining repositories were stopped',
@@ -323,6 +335,7 @@ window.__ModuleLoader__.load({
 .gm-tool{height:28px;flex:none;display:inline-flex;align-items:center;justify-content:center;gap:5px;border:0;background:0 0;padding:0 8px;border-radius:var(--dsw-radius-sm,4px);color:var(--dsw-alias-label-secondary);cursor:pointer;font:inherit;font-size:12px;white-space:nowrap}
 .gm-tool:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.16));color:var(--dsw-alias-label-primary)}
 .gm-tool[disabled]{opacity:.45;cursor:default}
+.gm-tool[aria-busy=true]{color:var(--dsw-alias-brand-primary)}
 .gm-tool svg{width:15px;height:15px;display:block;flex:none}
 .gm-bar{flex:none;display:flex;align-items:center;gap:14px;padding:8px 20px;flex-wrap:wrap;border-bottom:.5px solid var(--dsw-alias-border-l1)}
 .gm-meta{flex:none;display:flex;align-items:center;gap:14px;color:var(--dsw-alias-label-secondary);font-size:12px}
@@ -343,8 +356,28 @@ window.__ModuleLoader__.load({
 .gm-chip-track{display:inline-flex;gap:4px;font-size:10px;font-variant-numeric:tabular-nums}
 .gm-up{color:var(--dsw-alias-state-warn-primary)}
 .gm-down{color:var(--dsw-alias-label-secondary)}
-.gm-fetch-ok{color:var(--dsw-alias-state-success-primary)}
-.gm-fetch-fail{color:var(--dsw-alias-state-error-primary)}
+.gm-dialog-backdrop{position:fixed;inset:0;z-index:1000;display:flex;align-items:center;justify-content:center;padding:20px;background:rgba(0,0,0,.42)}
+.gm-dialog{width:min(440px,100%);box-sizing:border-box;display:flex;flex-direction:column;gap:10px;padding:18px 20px 16px;border:.5px solid var(--dsw-alias-border-l1);border-radius:10px;background:var(--dsw-alias-bg-base);box-shadow:0 16px 48px rgba(0,0,0,.28);color:var(--dsw-alias-label-primary)}
+.gm-dialog-title{margin:0;font-size:14px;font-weight:600;line-height:1.4}
+.gm-dialog-text{margin:0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1.6}
+.gm-dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:6px}
+.gm-dialog-btn{height:30px;padding:0 13px;border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-sm,4px);background:0 0;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;cursor:pointer}
+.gm-dialog-btn:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.16))}
+.gm-dialog-btn-primary{border-color:var(--dsw-alias-brand-primary);background:color-mix(in srgb,var(--dsw-alias-brand-primary) 14%,transparent);color:var(--dsw-alias-brand-primary);font-weight:600}
+.gm-dialog-btn-primary:hover{background:color-mix(in srgb,var(--dsw-alias-brand-primary) 22%,transparent)}
+.gm-fetch-toast{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:1000;display:flex;align-items:flex-start;gap:10px;width:min(560px,calc(100vw - 32px));box-sizing:border-box;padding:12px 14px;border:.5px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-base);box-shadow:0 8px 24px rgba(0,0,0,.18);font-size:12px;color:var(--dsw-alias-label-primary)}
+.gm-fetch-toast-ok{border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary) 55%,transparent)}
+.gm-fetch-toast-partial{border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 55%,transparent)}
+.gm-fetch-toast-error{border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 55%,transparent)}
+.gm-fetch-toast-icon{flex:none;display:flex;margin-top:1px;color:var(--dsw-alias-label-secondary)}
+.gm-fetch-toast-ok .gm-fetch-toast-icon{color:var(--dsw-alias-state-success-primary)}
+.gm-fetch-toast-partial .gm-fetch-toast-icon{color:var(--dsw-alias-state-warn-primary)}
+.gm-fetch-toast-error .gm-fetch-toast-icon{color:var(--dsw-alias-state-error-primary)}
+.gm-fetch-toast-body{flex:auto;min-width:0;display:flex;flex-direction:column;gap:2px}
+.gm-fetch-toast-title{font-weight:600}
+.gm-fetch-toast-text{color:var(--dsw-alias-label-secondary);line-height:1.5;word-break:break-word}
+.gm-fetch-toast-close{flex:none;border:0;background:0 0;color:var(--dsw-alias-label-secondary);font:inherit;font-size:15px;line-height:1;padding:2px 5px;border-radius:3px;cursor:pointer}
+.gm-fetch-toast-close:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.16));color:var(--dsw-alias-label-primary)}
 .gm-list{flex:auto;min-height:0;overflow:auto;padding:2px 0 24px;position:relative}
 .gm-list::-webkit-scrollbar-track{margin:2px}
 .gm-row{display:flex;align-items:flex-start;gap:10px;padding:4px 20px;cursor:pointer;outline:none;scroll-margin-top:56px}
@@ -410,7 +443,6 @@ window.__ModuleLoader__.load({
 .gm-status-error{color:var(--dsw-alias-state-error-primary)}
 .gm-confirm{flex:none;display:flex;align-items:center;gap:10px;padding:8px 20px;border-bottom:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);font-size:12px}
 .gm-confirm-text{flex:auto;min-width:0;color:var(--dsw-alias-label-secondary);line-height:1.5}
-.gm-confirm-yes{color:var(--dsw-alias-brand-primary)}
 .gm-confirm-error{background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 10%,transparent)}
 .gm-confirm-error .gm-confirm-text{color:var(--dsw-alias-state-error-primary)}
 .gm-retry{margin-left:10px;font:inherit;font-size:11px;padding:1px 8px;border-radius:3px;border:.5px solid var(--dsw-alias-border-l1);background:0 0;color:var(--dsw-alias-brand-primary);cursor:pointer}
@@ -526,6 +558,99 @@ window.__ModuleLoader__.load({
       return value
     }
 
+    /**
+     * 渲染拉取确认模态框：遮罩 + 居中卡片，明确展示仓库数量与只读语义。
+     * @param {(key: string) => string} t 翻译函数。
+     * @param {number} count 仓库数量。
+     * @param {() => void} onConfirm 开始拉取。
+     * @param {() => void} onCancel 取消。
+     */
+    function renderFetchConfirm(t, count, onConfirm, onCancel) {
+      return h(
+        'div',
+        { className: 'gm-dialog-backdrop', onClick: onCancel },
+        h(
+          'div',
+          {
+            className: 'gm-dialog',
+            role: 'dialog',
+            'aria-modal': 'true',
+            'aria-labelledby': 'gm-fetch-confirm-title',
+            'aria-describedby': 'gm-fetch-confirm-text',
+            onClick: (event) => event.stopPropagation(),
+          },
+          h('h2', { id: 'gm-fetch-confirm-title', className: 'gm-dialog-title' }, t('fetch.confirmTitle')),
+          h('p', { id: 'gm-fetch-confirm-text', className: 'gm-dialog-text' }, text(t, 'fetch.confirm', { count })),
+          h(
+            'div',
+            { className: 'gm-dialog-actions' },
+            h('button', { type: 'button', className: 'gm-dialog-btn', onClick: onCancel }, t('fetch.confirmNo')),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'gm-dialog-btn gm-dialog-btn-primary',
+                autoFocus: true,
+                onClick: onConfirm,
+              },
+              t('fetch.confirmYes'),
+            ),
+          ),
+        ),
+      )
+    }
+
+    /**
+     * 渲染拉取结果横幅：成功、部分失败、失败都用可关闭的醒目浮层反馈。
+     * @param {(key: string) => string} t 翻译函数。
+     * @param {{ status: string, count?: number, failed?: number, timedOut?: boolean, message?: string }} report 拉取结果。
+     * @param {() => void} onDismiss 关闭横幅。
+     */
+    function renderFetchToast(t, report, onDismiss) {
+      const error = report.status === 'error'
+      const partial = report.status === 'partial'
+      const title = error
+        ? t('fetch.errorTitle')
+        : report.timedOut === true
+          ? t('fetch.timeoutTitle')
+          : partial
+            ? t('fetch.partialTitle')
+            : t('fetch.doneTitle')
+      const detail = error
+        ? text(t, 'fetch.error', { message: report.message ?? '' })
+        : report.timedOut === true
+          ? t('fetch.timedOut')
+          : partial
+            ? text(t, 'fetch.partial', { count: report.failed ?? 0 })
+            : text(t, 'fetch.ok', { count: report.count ?? 0 })
+      return h(
+        'div',
+        {
+          className: `gm-fetch-toast gm-fetch-toast-${error ? 'error' : partial ? 'partial' : 'ok'}`,
+          role: error ? 'alert' : 'status',
+          'data-gm-fetch-report': error ? 'error' : partial ? 'partial' : 'ok',
+        },
+        h('span', { className: 'gm-fetch-toast-icon' }, error || partial ? h(AlertGlyph) : h(CheckGlyph)),
+        h(
+          'div',
+          { className: 'gm-fetch-toast-body' },
+          h('div', { className: 'gm-fetch-toast-title' }, title),
+          h('div', { className: 'gm-fetch-toast-text' }, detail),
+        ),
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'gm-fetch-toast-close',
+            title: t('fetch.dismiss'),
+            'aria-label': t('fetch.dismiss'),
+            onClick: onDismiss,
+          },
+          '×',
+        ),
+      )
+    }
+
     /** 拉取图标。 */
     function FetchGlyph() {
       return h(
@@ -538,6 +663,37 @@ window.__ModuleLoader__.load({
           strokeLinecap: 'round',
           strokeLinejoin: 'round',
         }),
+      )
+    }
+
+    /** 成功状态图标。 */
+    function CheckGlyph() {
+      return h(
+        'svg',
+        { viewBox: '0 0 16 16', width: 15, height: 15, 'aria-hidden': true, fill: 'none' },
+        h('path', {
+          d: 'm3.5 8.4 3 3 6-6.2',
+          stroke: 'currentColor',
+          strokeWidth: 1.6,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+        }),
+      )
+    }
+
+    /** 警告/失败状态图标。 */
+    function AlertGlyph() {
+      return h(
+        'svg',
+        { viewBox: '0 0 16 16', width: 15, height: 15, 'aria-hidden': true, fill: 'none' },
+        h('path', {
+          d: 'M8 2.2 1.8 13.4h12.4z',
+          stroke: 'currentColor',
+          strokeWidth: 1.3,
+          strokeLinejoin: 'round',
+        }),
+        h('path', { d: 'M8 6.2v3.2', stroke: 'currentColor', strokeWidth: 1.3, strokeLinecap: 'round' }),
+        h('circle', { cx: 8, cy: 11.6, r: 0.8, fill: 'currentColor' }),
       )
     }
 
@@ -1096,6 +1252,17 @@ window.__ModuleLoader__.load({
           [],
         )
 
+        // 确认拉取以模态框呈现，Esc 需要能关闭；测试环境的 DOM 桩下跳过绑定。
+        useEffect(() => {
+          if (!confirmingFetch) return undefined
+          if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') return undefined
+          const onKeyDown = (event) => {
+            if (event.key === 'Escape') setConfirmingFetch(false)
+          }
+          document.addEventListener('keydown', onKeyDown)
+          return () => document.removeEventListener('keydown', onKeyDown)
+        }, [confirmingFetch])
+
         // A view instance can be reused while its session cwd changes. Cancel all work and
         // clear state tied to the previous workspace before accepting the new responses.
         useEffect(() => {
@@ -1595,6 +1762,7 @@ window.__ModuleLoader__.load({
             className: 'gm-tool',
             key: 'fetch',
             title: t('action.fetchHint'),
+            'aria-busy': fetching,
             disabled: loading || fetching,
             onClick: () => {
               if (repos.length > 0) setConfirmingFetch(true)
@@ -1669,6 +1837,12 @@ window.__ModuleLoader__.load({
                   t('fetch.confirmNo'),
                 ),
               )
+
+        // 拉取前用模态框确认，拉取后用醒目且可关闭的横幅反馈结果。
+        const fetchConfirmDialog = confirmingFetch
+          ? renderFetchConfirm(t, repos.length, runFetch, () => setConfirmingFetch(false))
+          : null
+        const fetchToast = fetchReport === null ? null : renderFetchToast(t, fetchReport, () => setFetchReport(null))
 
         if (state.status === 'no-workspace') {
           return h(
@@ -2429,24 +2603,9 @@ window.__ModuleLoader__.load({
           { className: 'gm-root', 'data-gm-status': state.status, 'data-gm-mode': 'history' },
           h('style', null, STYLE),
           toolbar,
-          confirmingFetch
-            ? h(
-                'div',
-                { className: 'gm-confirm', role: 'alertdialog', 'aria-label': t('fetch.confirmYes') },
-                h('span', { className: 'gm-confirm-text' }, text(t, 'fetch.confirm', { count: repos.length })),
-                h(
-                  'button',
-                  { type: 'button', className: 'gm-tool gm-confirm-yes', onClick: runFetch },
-                  t('fetch.confirmYes'),
-                ),
-                h(
-                  'button',
-                  { type: 'button', className: 'gm-tool', onClick: () => setConfirmingFetch(false) },
-                  t('fetch.confirmNo'),
-                ),
-              )
-            : null,
+          fetchConfirmDialog,
           diffErrorBanner,
+          fetchToast,
           h(
             'div',
             { className: 'gm-bar' },
@@ -2469,25 +2628,6 @@ window.__ModuleLoader__.load({
               ? h('span', { className: 'gm-meta gm-meta-warn' }, t('state.truncated'))
               : null,
             loading && data !== null ? h('span', { className: 'gm-meta' }, t('state.loading')) : null,
-            fetchReport === null
-              ? null
-              : h(
-                  'span',
-                  {
-                    className:
-                      fetchReport.status === 'ok'
-                        ? 'gm-meta gm-fetch-ok'
-                        : 'gm-meta gm-fetch-fail',
-                    'aria-live': 'polite',
-                  },
-                  fetchReport.status === 'error'
-                    ? text(t, 'fetch.error', { message: fetchReport.message ?? '' })
-                    : fetchReport.timedOut === true
-                      ? t('fetch.timedOut')
-                      : fetchReport.status === 'partial'
-                        ? text(t, 'fetch.partial', { count: fetchReport.failed })
-                        : text(t, 'fetch.ok', { count: fetchReport.count }),
-                ),
             h(
               'select',
               {

@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here. Versions follow [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed
+
+- Fetch feedback is now explicit: clicking **Fetch** opens a blocking confirmation dialog (title, repository count, read-only explanation, explicit start/cancel, `Esc` to close), and the result is reported in a prominent, dismissible banner for success, partial failures, timeouts and request errors instead of a subtle inline note.
+
+
 ## 0.2.0 — 2026-11-11
 
 ### Added

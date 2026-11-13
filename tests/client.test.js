@@ -447,6 +447,105 @@ test('late Fetch completion cannot finish a newer Fetch', async () => {
   renderer.unmount()
 })
 
+test('fetch confirmation is a blocking dialog with explicit start and cancel', async () => {
+  const requests = []
+  const client = loadClient(requestFetch(requests))
+  const renderer = new HookRenderer(client.view, null)
+  renderer.cwd = 'C:/dialog-workspace'
+  renderer.props = viewProps(renderer)
+  renderer.render()
+  deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'DIALOG', 'f'.repeat(40)))
+  await renderer.flush()
+
+  const openDialog = () =>
+    findOne(renderer.tree, (node) => node.type === 'button' && node.props?.title?.startsWith('action.fetchHint'))
+  openDialog().props.onClick()
+  await renderer.flush()
+
+  const dialog = findOne(renderer.tree, (node) => node.props?.role === 'dialog')
+  assert.ok(dialog, 'fetch must open a modal confirmation dialog')
+  assert.equal(dialog.props['aria-modal'], 'true')
+  const dialogText = textContent(dialog)
+  assert.ok(dialogText.includes('fetch.confirmTitle'), 'dialog needs a title')
+  assert.ok(dialogText.includes('fetch.confirmYes'), 'dialog needs an explicit start action')
+  assert.ok(dialogText.includes('fetch.confirmNo'), 'dialog needs a cancel action')
+
+  const cancel = findOne(dialog, (node) => node.type === 'button' && textContent(node) === 'fetch.confirmNo')
+  cancel.props.onClick()
+  await renderer.flush()
+  assert.equal(findOne(renderer.tree, (node) => node.props?.role === 'dialog'), undefined, 'cancel closes the dialog')
+  assert.equal(
+    requests.filter((entry) => entry.kind === 'fetch').length,
+    0,
+    'cancel must not start a fetch',
+  )
+
+  openDialog().props.onClick()
+  await renderer.flush()
+  const confirm = findOne(renderer.tree, (node) => node.type === 'button' && textContent(node) === 'fetch.confirmYes')
+  confirm.props.onClick()
+  await renderer.flush()
+  assert.equal(
+    findOne(renderer.tree, (node) => node.props?.role === 'dialog'),
+    undefined,
+    'dialog closes once the fetch starts',
+  )
+  deferredRequest(requests, 'fetch', renderer.cwd).resolve({ failed: 0, results: [{ name: 'repo', ok: true }] })
+  await renderer.flush()
+  renderer.unmount()
+})
+
+test('fetch result is shown in a prominent, dismissible status banner', async () => {
+  const requests = []
+  const client = loadClient(requestFetch(requests))
+  const renderer = new HookRenderer(client.view, null)
+  renderer.cwd = 'C:/toast-workspace'
+  renderer.props = viewProps(renderer)
+  renderer.render()
+  deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'TOAST', 'a'.repeat(40)))
+  await renderer.flush()
+
+  const startFetch = () =>
+    findOne(renderer.tree, (node) => node.type === 'button' && node.props?.title?.startsWith('action.fetchHint')).props.onClick()
+  const confirmFetch = () =>
+    findOne(renderer.tree, (node) => node.type === 'button' && textContent(node) === 'fetch.confirmYes').props.onClick()
+
+  startFetch()
+  await renderer.flush()
+  confirmFetch()
+  await renderer.flush()
+  deferredRequest(requests, 'fetch', renderer.cwd).resolve({ failed: 0, results: [{ name: 'repo', ok: true }] })
+  await renderer.flush()
+
+  const banner = findOne(renderer.tree, (node) => node.props?.['data-gm-fetch-report'] === 'ok')
+  assert.ok(banner, 'successful fetch must show a result banner')
+  assert.equal(banner.props.role, 'status')
+  const bannerText = textContent(banner)
+  assert.ok(bannerText.includes('fetch.doneTitle'), 'banner needs a result title')
+  assert.ok(bannerText.includes('fetch.ok'), 'banner needs the result detail')
+  const dismiss = findOne(banner, (node) => node.type === 'button' && node.props?.['aria-label'] === 'fetch.dismiss')
+  assert.ok(dismiss, 'banner must be dismissible')
+  dismiss.props.onClick()
+  await renderer.flush()
+  assert.equal(findOne(renderer.tree, (node) => node.props?.['data-gm-fetch-report']), undefined)
+
+  // 拉取完成后会触发一次刷新，先让它结束再发起第二次拉取。
+  deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'TOAST', 'a'.repeat(40)))
+  await renderer.flush()
+
+  startFetch()
+  await renderer.flush()
+  confirmFetch()
+  await renderer.flush()
+  deferredRequest(requests, 'fetch', renderer.cwd).reject(new Error('network down'))
+  await renderer.flush()
+  const failure = findOne(renderer.tree, (node) => node.props?.['data-gm-fetch-report'] === 'error')
+  assert.ok(failure, 'failed fetch must show an error banner')
+  assert.equal(failure.props.role, 'alert')
+  assert.ok(textContent(failure).includes('fetch.errorTitle'), 'failure banner needs an error title')
+  renderer.unmount()
+})
+
 test('restored diff tab title and body recover absent or empty navigation parameters', async () => {
   const storage = new Map([[
     'dsh-git-multirepo:tab-params:v1',
