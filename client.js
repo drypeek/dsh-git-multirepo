@@ -45,10 +45,13 @@ window.__ModuleLoader__.load({
     ]
     /** 确认拉取后的免确认窗口（毫秒）；fetch 只更新远程引用，不值得每次都打断。 */
     const FETCH_CONFIRM_TTL_MS = 10 * 60 * 1000
-    /** 拉取结果横幅的自动消失时间（毫秒）。 */
+    /** 成功结果横幅的自动消失时间（毫秒）；失败结果保留到用户关闭或下一次拉取。 */
     const FETCH_TOAST_MS = 3000
-    /** 最近一次确认拉取的时间；只在当前页面会话内有效，刷新后恢复确认。 */
-    let fetchConfirmedAt = 0
+    /**
+     * 页面会话内各工作区最近一次成功拉取的时间：cwd -> timestamp。
+     * 只保存在内存中，不写 localStorage，刷新页面后重新询问；失败或空仓库列表不记录。
+     */
+    const fetchConfirmedRoots = new Map()
 
     /** 中文文案。 */
     const zh = {
@@ -66,6 +69,12 @@ window.__ModuleLoader__.load({
       'fetch.errorTitle': '拉取失败',
       'fetch.timeoutTitle': '拉取超时',
       'fetch.dismiss': '关闭',
+      'fetch.details': '查看详情（{count}）',
+      'fetch.hideDetails': '收起详情',
+      'fetch.skippedRoot': '不是有效仓库根，已跳过',
+      'fetch.untriedNote': '超时前尚未开始的仓库没有尝试拉取。',
+      'fetch.unknownError': '未知错误',
+      'fetch.timeoutWithFailures': '等待超时，超时前有 {count} 个仓库没拉取成功，剩下的仓库先跳过了',
       'upstream.ahead': '领先远程 {count} 个提交（本地未推送）',
       'upstream.behind': '落后远程 {count} 个提交（需要拉取）',
       'branch.current': '当前分支',
@@ -131,7 +140,7 @@ window.__ModuleLoader__.load({
       'diff.openFailed': '打开差异页签失败：{message}',
       'fetch.confirm': '会为 {count} 个仓库拉取最新的远程状态；不会合并代码，也不会改动你工作区里的文件。',
       'fetch.confirmTitle': '要同步远程更新吗？',
-      'fetch.confirmNote': '确认后 10 分钟内不再询问。',
+      'fetch.confirmNote': '仅在本页会话内：同一工作区确认后 10 分钟内不再询问，刷新页面后重新确认。',
       'fetch.confirmYes': '开始拉取',
       'fetch.confirmNo': '取消',
       'fetch.timedOut': '等待超时，剩下的仓库先跳过了',
@@ -204,6 +213,12 @@ window.__ModuleLoader__.load({
       'fetch.errorTitle': 'Fetch failed',
       'fetch.timeoutTitle': 'Fetch timed out',
       'fetch.dismiss': 'Dismiss',
+      'fetch.details': 'Show details ({count})',
+      'fetch.hideDetails': 'Hide details',
+      'fetch.skippedRoot': 'Not a repository root; skipped',
+      'fetch.untriedNote': 'Repositories not reached before the timeout were not attempted.',
+      'fetch.unknownError': 'Unknown error',
+      'fetch.timeoutWithFailures': 'Timed out; {count} repositories had failed before the remaining ones were skipped',
       'upstream.ahead': '{count} commits ahead of upstream (not pushed)',
       'upstream.behind': '{count} commits behind upstream (needs fetch)',
       'branch.current': 'Current branch',
@@ -269,7 +284,7 @@ window.__ModuleLoader__.load({
       'diff.openFailed': 'Cannot open the diff tab: {message}',
       'fetch.confirm': '{count} repositories will fetch their latest remote state. Nothing is merged, and your working files stay untouched.',
       'fetch.confirmTitle': 'Sync remote updates?',
-      'fetch.confirmNote': "You won't be asked again for 10 minutes.",
+      'fetch.confirmNote': 'For this page session only: the same workspace will not be asked again for 10 minutes, and a page reload asks again.',
       'fetch.confirmYes': 'Start fetch',
       'fetch.confirmNo': 'Cancel',
       'fetch.timedOut': 'Timed out; the remaining repositories were skipped',
@@ -328,7 +343,7 @@ window.__ModuleLoader__.load({
 
     /** 插件样式，随视图渲染。 */
     const STYLE = `
-.gm-root{height:100%;min-height:0;display:flex;flex-direction:column;color:var(--dsw-alias-label-primary);font-size:var(--dsh-content-font-size-secondary,13px);line-height:1.5;box-sizing:border-box;background:var(--dsw-alias-bg-base)}
+.gm-root{height:100%;min-height:0;display:flex;flex-direction:column;position:relative;color:var(--dsw-alias-label-primary);font-size:var(--dsh-content-font-size-secondary,13px);line-height:1.5;box-sizing:border-box;background:var(--dsw-alias-bg-base)}
 .gm-toolbar{flex:none;position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:8px;height:44px;padding:0 10px 0 20px;border-bottom:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-base)}
 .gm-heading{flex:none;display:flex;align-items:baseline;gap:10px;max-width:26%;overflow:hidden}
 .gm-heading-text{flex:none;font-size:14px;font-weight:600;white-space:nowrap}
@@ -376,19 +391,28 @@ window.__ModuleLoader__.load({
 .gm-dialog-btn:focus-visible{outline:2px solid color-mix(in srgb,var(--dsw-alias-brand-primary) 30%,transparent);outline-offset:2px}
 .gm-dialog-btn-primary{border-color:transparent;background:color-mix(in srgb,var(--dsw-alias-brand-primary) 11%,transparent);color:var(--dsw-alias-brand-primary);font-weight:600}
 .gm-dialog-btn-primary:hover{background:color-mix(in srgb,var(--dsw-alias-brand-primary) 17%,transparent)}
-.gm-fetch-toast{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:1000;display:flex;align-items:flex-start;gap:10px;width:min(560px,calc(100vw - 32px));box-sizing:border-box;padding:12px 14px;border:.5px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-base);box-shadow:0 8px 24px rgba(0,0,0,.18);font-size:12px;color:var(--dsw-alias-label-primary)}
+.gm-fetch-toast{position:absolute;top:52px;left:50%;transform:translateX(-50%);z-index:20;display:flex;align-items:flex-start;gap:10px;width:min(560px,calc(100% - 32px));max-height:60%;overflow:auto;box-sizing:border-box;padding:12px 14px;border:.5px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-base);box-shadow:0 8px 24px rgba(0,0,0,.18);font-size:12px;color:var(--dsw-alias-label-primary)}
 .gm-fetch-toast-ok{border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary) 55%,transparent)}
-.gm-fetch-toast-partial{border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 55%,transparent)}
+.gm-fetch-toast-partial,.gm-fetch-toast-timeout{border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 55%,transparent)}
 .gm-fetch-toast-error{border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 55%,transparent)}
 .gm-fetch-toast-icon{flex:none;display:flex;margin-top:1px;color:var(--dsw-alias-label-secondary)}
 .gm-fetch-toast-ok .gm-fetch-toast-icon{color:var(--dsw-alias-state-success-primary)}
 .gm-fetch-toast-partial .gm-fetch-toast-icon{color:var(--dsw-alias-state-warn-primary)}
+.gm-fetch-toast-timeout .gm-fetch-toast-icon{color:var(--dsw-alias-state-warn-primary)}
 .gm-fetch-toast-error .gm-fetch-toast-icon{color:var(--dsw-alias-state-error-primary)}
 .gm-fetch-toast-body{flex:auto;min-width:0;display:flex;flex-direction:column;gap:2px}
 .gm-fetch-toast-title{font-weight:600}
 .gm-fetch-toast-text{color:var(--dsw-alias-label-secondary);line-height:1.5;word-break:break-word}
 .gm-fetch-toast-close{flex:none;border:0;background:0 0;color:var(--dsw-alias-label-secondary);font:inherit;font-size:15px;line-height:1;padding:2px 5px;border-radius:3px;cursor:pointer}
 .gm-fetch-toast-close:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.16));color:var(--dsw-alias-label-primary)}
+.gm-fetch-toast-close:focus-visible{outline:2px solid color-mix(in srgb,var(--dsw-alias-brand-primary) 40%,transparent);outline-offset:2px}
+.gm-fetch-toast-more{align-self:flex-start;margin-top:4px;padding:0;border:0;background:0 0;font:inherit;font-size:11px;line-height:1.5;color:var(--dsw-alias-brand-primary);cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+.gm-fetch-toast-more:focus-visible{outline:2px solid color-mix(in srgb,var(--dsw-alias-brand-primary) 40%,transparent);outline-offset:2px;border-radius:2px}
+.gm-fetch-toast-details{list-style:none;margin:6px 0 0;padding:0;display:flex;flex-direction:column;gap:4px;max-height:180px;overflow:auto}
+.gm-fetch-toast-detail{display:flex;gap:6px;font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary);word-break:break-word}
+.gm-fetch-toast-repo{flex:none;font-weight:600;color:var(--dsw-alias-label-primary)}
+.gm-fetch-toast-msg{flex:auto;min-width:0}
+.gm-fetch-toast-detail-skip .gm-fetch-toast-msg{opacity:.75}
 .gm-list{flex:auto;min-height:0;overflow:auto;padding:2px 0 24px;position:relative}
 .gm-list::-webkit-scrollbar-track{margin:2px}
 .gm-row{display:flex;align-items:flex-start;gap:10px;padding:4px 20px;cursor:pointer;outline:none;scroll-margin-top:56px}
@@ -570,13 +594,50 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 汇总 Host 的拉取响应：区分真正失败的仓库与扫描时被跳过的非仓库目录。
+     * status 只会是 timeout / partial / ok 之一；网络或 HTTP 错误由调用方记为 error。
+     * @param {{ timedOut?: boolean, results?: Array<{ name?: string, ok?: boolean, message?: string|null }> }} payload Host 响应。
+     * @returns {{ status: string, count: number, okCount: number, failed: number, skipped: string[], failures: Array<{name: string, message: string}>, timedOut: boolean }}
+     */
+    function summarizeFetchReport(payload) {
+      const results = Array.isArray(payload?.results) ? payload.results : []
+      const failures = []
+      const skipped = []
+      let okCount = 0
+      for (const item of results) {
+        if (item === null || typeof item !== 'object') continue
+        const name = typeof item.name === 'string' && item.name !== '' ? item.name : '?'
+        if (item.ok === true) {
+          okCount += 1
+          continue
+        }
+        if (item.message === 'not-a-repository-root') {
+          skipped.push(name)
+          continue
+        }
+        failures.push({ name, message: typeof item.message === 'string' ? item.message : '' })
+      }
+      const timedOut = payload?.timedOut === true
+      return {
+        status: timedOut ? 'timeout' : failures.length > 0 ? 'partial' : 'ok',
+        count: results.length,
+        okCount,
+        failed: failures.length,
+        skipped,
+        failures,
+        timedOut,
+      }
+    }
+
+    /**
      * 渲染拉取确认模态框：遮罩 + 居中卡片，明确展示仓库数量与只读语义。
      * @param {(key: string) => string} t 翻译函数。
      * @param {number} count 仓库数量。
      * @param {() => void} onConfirm 开始拉取。
      * @param {() => void} onCancel 取消。
+     * @param {{ current: any }} [dialogRef] 指向对话框节点的 ref，供焦点陷阱使用。
      */
-    function renderFetchConfirm(t, count, onConfirm, onCancel) {
+    function renderFetchConfirm(t, count, onConfirm, onCancel, dialogRef) {
       return h(
         'div',
         { className: 'gm-dialog-backdrop', onClick: onCancel },
@@ -584,15 +645,16 @@ window.__ModuleLoader__.load({
           'div',
           {
             className: 'gm-dialog',
+            ref: dialogRef,
             role: 'dialog',
             'aria-modal': 'true',
             'aria-labelledby': 'gm-fetch-confirm-title',
-            'aria-describedby': 'gm-fetch-confirm-text',
+            'aria-describedby': 'gm-fetch-confirm-text gm-fetch-confirm-note',
             onClick: (event) => event.stopPropagation(),
           },
           h('h2', { id: 'gm-fetch-confirm-title', className: 'gm-dialog-title' }, t('fetch.confirmTitle')),
           h('p', { id: 'gm-fetch-confirm-text', className: 'gm-dialog-text' }, text(t, 'fetch.confirm', { count })),
-          h('p', { className: 'gm-dialog-note' }, t('fetch.confirmNote')),
+          h('p', { id: 'gm-fetch-confirm-note', className: 'gm-dialog-note' }, t('fetch.confirmNote')),
           h(
             'div',
             { className: 'gm-dialog-actions' },
@@ -613,41 +675,100 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 渲染拉取结果横幅：成功、部分失败、失败都用可关闭的醒目浮层反馈。
+     * 渲染拉取结果横幅：成功、部分失败、超时、失败都是可关闭的醒目浮层。
+     * 失败明细按仓库展开，区分真正的 fetch 失败与扫描时跳过的非仓库目录。
      * @param {(key: string) => string} t 翻译函数。
-     * @param {{ status: string, count?: number, failed?: number, timedOut?: boolean, message?: string }} report 拉取结果。
+     * @param {{ status: string, okCount?: number, failed?: number, skipped?: string[], failures?: Array<{name: string, message: string}>, timedOut?: boolean, message?: string }} report 拉取结果。
      * @param {() => void} onDismiss 关闭横幅。
+     * @param {boolean} detailsOpen 失败明细是否展开。
+     * @param {() => void} onToggleDetails 展开/收起失败明细。
      */
-    function renderFetchToast(t, report, onDismiss) {
-      const error = report.status === 'error'
-      const partial = report.status === 'partial'
-      const title = error
-        ? t('fetch.errorTitle')
-        : report.timedOut === true
-          ? t('fetch.timeoutTitle')
-          : partial
-            ? t('fetch.partialTitle')
-            : t('fetch.doneTitle')
-      const detail = error
-        ? text(t, 'fetch.error', { message: report.message ?? '' })
-        : report.timedOut === true
-          ? t('fetch.timedOut')
-          : partial
-            ? text(t, 'fetch.partial', { count: report.failed ?? 0 })
-            : text(t, 'fetch.ok', { count: report.count ?? 0 })
+    function renderFetchToast(t, report, onDismiss, detailsOpen, onToggleDetails) {
+      const status = report.status
+      const failed = report.failed ?? 0
+      const skipped = Array.isArray(report.skipped) ? report.skipped : []
+      const failures = Array.isArray(report.failures) ? report.failures : []
+      const timedOut = report.timedOut === true
+      const title =
+        status === 'error'
+          ? t('fetch.errorTitle')
+          : status === 'timeout'
+            ? t('fetch.timeoutTitle')
+            : status === 'partial'
+              ? t('fetch.partialTitle')
+              : t('fetch.doneTitle')
+      const detail =
+        status === 'error'
+          ? text(t, 'fetch.error', { message: report.message ?? '' })
+          : status === 'timeout'
+            ? failed > 0
+              ? text(t, 'fetch.timeoutWithFailures', { count: failed })
+              : t('fetch.timedOut')
+            : status === 'partial'
+              ? text(t, 'fetch.partial', { count: failed })
+              : text(t, 'fetch.ok', { count: report.okCount ?? 0 })
+      const rows = []
+      for (const failure of failures) {
+        rows.push(
+          h(
+            'li',
+            { className: 'gm-fetch-toast-detail', key: `f:${failure.name}` },
+            h('span', { className: 'gm-fetch-toast-repo' }, failure.name),
+            h(
+              'span',
+              { className: 'gm-fetch-toast-msg' },
+              failure.message !== '' ? failure.message : t('fetch.unknownError'),
+            ),
+          ),
+        )
+      }
+      for (const name of skipped) {
+        rows.push(
+          h(
+            'li',
+            { className: 'gm-fetch-toast-detail gm-fetch-toast-detail-skip', key: `s:${name}` },
+            h('span', { className: 'gm-fetch-toast-repo' }, name),
+            h('span', { className: 'gm-fetch-toast-msg' }, t('fetch.skippedRoot')),
+          ),
+        )
+      }
+      if (timedOut) {
+        rows.push(
+          h(
+            'li',
+            { className: 'gm-fetch-toast-detail gm-fetch-toast-detail-timeout', key: 'timeout' },
+            h('span', { className: 'gm-fetch-toast-msg' }, t('fetch.untriedNote')),
+          ),
+        )
+      }
       return h(
         'div',
         {
-          className: `gm-fetch-toast gm-fetch-toast-${error ? 'error' : partial ? 'partial' : 'ok'}`,
-          role: error ? 'alert' : 'status',
-          'data-gm-fetch-report': error ? 'error' : partial ? 'partial' : 'ok',
+          className: `gm-fetch-toast gm-fetch-toast-${status}`,
+          role: status === 'ok' ? 'status' : 'alert',
+          'data-gm-fetch-report': status,
         },
-        h('span', { className: 'gm-fetch-toast-icon' }, error || partial ? h(AlertGlyph) : h(CheckGlyph)),
+        h('span', { className: 'gm-fetch-toast-icon' }, status === 'ok' ? h(CheckGlyph) : h(AlertGlyph)),
         h(
           'div',
           { className: 'gm-fetch-toast-body' },
           h('div', { className: 'gm-fetch-toast-title' }, title),
           h('div', { className: 'gm-fetch-toast-text' }, detail),
+          rows.length === 0
+            ? null
+            : h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'gm-fetch-toast-more',
+                  'aria-expanded': detailsOpen ? 'true' : 'false',
+                  onClick: onToggleDetails,
+                },
+                detailsOpen ? t('fetch.hideDetails') : text(t, 'fetch.details', { count: rows.length }),
+              ),
+          rows.length === 0 || !detailsOpen
+            ? null
+            : h('ul', { className: 'gm-fetch-toast-details' }, rows),
         ),
         h(
           'button',
@@ -1214,6 +1335,7 @@ window.__ModuleLoader__.load({
         const [fetchReport, setFetchReport] = useState(null)
         const [state, setState] = useState({ status: 'idle', data: null, failure: null, key: '' })
         const [confirmingFetch, setConfirmingFetch] = useState(false)
+        const [fetchDetailsOpen, setFetchDetailsOpen] = useState(false)
         const [openDiffError, setOpenDiffError] = useState(null)
         // 视图模式：提交历史时间线或工作区改动；首次挂载时从本地存储恢复。
         const [mode, setMode] = useState(readViewMode)
@@ -1224,6 +1346,12 @@ window.__ModuleLoader__.load({
         const fetchAbortRef = useRef(null)
         const changesAbortRef = useRef(null)
         const detailAbortsRef = useRef(new Map())
+        const rootRef = useRef(null)
+        const fetchDialogRef = useRef(null)
+        const fetchButtonElRef = useRef(null)
+        // 打开对话框前焦点所在元素；关闭后恢复。fetch 成功返回后还要把焦点还给 Fetch 按钮。
+        const lastFocusedRef = useRef(null)
+        const refocusAfterFetchRef = useRef(false)
         const viewKeyRef = useRef(viewKey)
         const workspaceKeyRef = useRef(cwd)
         // Keep the current view identity available to async callbacks immediately after a render.
@@ -1264,26 +1392,105 @@ window.__ModuleLoader__.load({
           [],
         )
 
-        // 确认拉取以模态框呈现，Esc 需要能关闭；测试环境的 DOM 桩下跳过绑定。
+        // 确认拉取以模态框呈现：Esc 关闭、Tab 在对话框内循环、锁背景滚动，关闭后恢复焦点。
+        // 测试环境的 DOM 桩下跳过绑定。
         useEffect(() => {
           if (!confirmingFetch) return undefined
           if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') return undefined
+          const dialog = fetchDialogRef.current
+          const body = document.body
+          const previousOverflow = body?.style?.overflow ?? ''
+          if (body?.style) body.style.overflow = 'hidden'
+          const focusableItems = () => {
+            if (dialog === null || dialog === undefined || typeof dialog.querySelectorAll !== 'function') return []
+            return Array.from(
+              dialog.querySelectorAll(
+                'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+              ),
+            ).filter((element) => element.disabled !== true)
+          }
           const onKeyDown = (event) => {
-            if (event.key === 'Escape') setConfirmingFetch(false)
+            if (event.key === 'Escape') {
+              event.preventDefault()
+              setConfirmingFetch(false)
+              return
+            }
+            if (event.key !== 'Tab') return
+            const items = focusableItems()
+            if (items.length === 0) return
+            const first = items[0]
+            const last = items[items.length - 1]
+            const active = document.activeElement
+            if (event.shiftKey) {
+              if (active === first || (active !== undefined && active !== null && !items.includes(active))) {
+                event.preventDefault()
+                last.focus()
+              }
+            } else if (active === last || (active !== undefined && active !== null && !items.includes(active))) {
+              event.preventDefault()
+              first.focus()
+            }
           }
           document.addEventListener('keydown', onKeyDown)
-          return () => document.removeEventListener('keydown', onKeyDown)
+          return () => {
+            document.removeEventListener('keydown', onKeyDown)
+            if (body?.style) body.style.overflow = previousOverflow
+            const previous = lastFocusedRef.current
+            // 确认后 fetch 异步进行中，等它结束再把焦点还给 Fetch 按钮。
+            if (refocusAfterFetchRef.current) return
+            if (previous !== null && previous !== undefined && typeof previous.focus === 'function') previous.focus()
+          }
         }, [confirmingFetch])
 
-        // 结果横幅只短暂停留，避免一直挡在页面上；测试环境的定时器桩不存在时跳过。
+        // 对话框打开时把插件内其余内容设为 inert / aria-hidden，避免 Tab 或读屏进入背景。
         useEffect(() => {
-          if (fetchReport === null) return undefined
+          if (!confirmingFetch) return undefined
+          const root = rootRef.current
+          if (root === null || root === undefined || root.children === null || root.children === undefined) {
+            return undefined
+          }
+          const dialog = fetchDialogRef.current
+          const marked = []
+          for (const child of Array.from(root.children)) {
+            // 背景内容不能把对话框一起标记：对话框挂在固定的遮罩层里，是 root 的孙节点。
+            if (child === dialog) continue
+            if (dialog !== null && dialog !== undefined && typeof child.contains === 'function' && child.contains(dialog)) {
+              continue
+            }
+            if (typeof child.setAttribute !== 'function') continue
+            child.setAttribute('inert', '')
+            child.setAttribute('aria-hidden', 'true')
+            marked.push(child)
+          }
+          return () => {
+            for (const child of marked) {
+              if (typeof child.removeAttribute === 'function') {
+                child.removeAttribute('inert')
+                child.removeAttribute('aria-hidden')
+              }
+            }
+          }
+        }, [confirmingFetch])
+
+        // 成功结果横幅短暂停留；失败、部分失败和超时保留到用户关闭或下一次拉取。
+        // 测试环境的定时器桩不存在时跳过。
+        useEffect(() => {
+          if (fetchReport === null || fetchReport.status !== 'ok') return undefined
           if (typeof setTimeout !== 'function') return undefined
           const timer = setTimeout(() => setFetchReport(null), FETCH_TOAST_MS)
           return () => {
             if (typeof clearTimeout === 'function') clearTimeout(timer)
           }
         }, [fetchReport])
+
+        // 确认后 fetch 结束（按钮重新可用）再把焦点还给 Fetch 按钮。
+        useEffect(() => {
+          if (fetching || !refocusAfterFetchRef.current) return undefined
+          refocusAfterFetchRef.current = false
+          const target = fetchButtonElRef.current ?? lastFocusedRef.current
+          if (target !== null && target !== undefined && typeof target.focus === 'function') target.focus()
+          return undefined
+        }, [fetching])
 
         // A view instance can be reused while its session cwd changes. Cancel all work and
         // clear state tied to the previous workspace before accepting the new responses.
@@ -1299,7 +1506,9 @@ window.__ModuleLoader__.load({
           setExpandedKey(null)
           setDetails({})
           setFetchReport(null)
+          setFetchDetailsOpen(false)
           setConfirmingFetch(false)
+          refocusAfterFetchRef.current = false
           setOpenDiffError(null)
           setCollapsedChangeRepos([])
           setChangesState({ status: 'idle', data: null, failure: null, key: '' })
@@ -1663,9 +1872,8 @@ window.__ModuleLoader__.load({
           [getDetailKey, loadDetail],
         )
 
-        const runFetch = useCallback(() => {
+        const runFetch = useCallback((options = {}) => {
           if (typeof cwd !== 'string' || cwd === '') return
-          fetchConfirmedAt = Date.now()
           const requestWorkspace = cwd
           fetchAbortRef.current?.abort()
           const controller = new AbortController()
@@ -1673,20 +1881,21 @@ window.__ModuleLoader__.load({
           setConfirmingFetch(false)
           setFetching(true)
           setFetchReport(null)
+          setFetchDetailsOpen(false)
           const params = new URLSearchParams({ root: cwd })
           fetch(`${FETCH_URL}?${params.toString()}`, { method: 'POST', signal: controller.signal })
             .then(async (response) => {
               if (!response.ok) throw new Error(await failureMessage(response, t))
               return response.json()
             })
-            .then((report) => {
+            .then((payload) => {
               if (controller.signal.aborted || workspaceKeyRef.current !== requestWorkspace) return
-              setFetchReport({
-                status: (report.failed ?? 0) > 0 ? 'partial' : 'ok',
-                count: report.results?.length ?? 0,
-                failed: report.failed ?? 0,
-                timedOut: report.timedOut === true,
-              })
+              const report = summarizeFetchReport(payload)
+              setFetchReport(report)
+              // 只有用户确认过、且至少真正拉取了一个仓库，才记住这个工作区。
+              if (options.remember === true && report.count > 0) {
+                fetchConfirmedRoots.set(requestWorkspace, Date.now())
+              }
               setExpandedKey(null)
               setDetails({})
               setReloadToken((value) => value + 1)
@@ -1784,13 +1993,20 @@ window.__ModuleLoader__.load({
             type: 'button',
             className: 'gm-tool',
             key: 'fetch',
+            ref: fetchButtonElRef,
             title: t('action.fetchHint'),
             'aria-busy': fetching,
             disabled: loading || fetching,
             onClick: () => {
-              // 刚确认过的短时间内直接拉取，避免每次 fetch 都打断用户。
-              if (repos.length > 0 && Date.now() - fetchConfirmedAt > FETCH_CONFIRM_TTL_MS) setConfirmingFetch(true)
-              else runFetch()
+              // 同一工作区确认后 10 分钟内直接拉取；换工作区或过期则重新询问。
+              const confirmedAt = fetchConfirmedRoots.get(cwd) ?? 0
+              if (repos.length === 0 || Date.now() - confirmedAt <= FETCH_CONFIRM_TTL_MS) {
+                runFetch()
+                return
+              }
+              lastFocusedRef.current =
+                (typeof document === 'undefined' ? null : document.activeElement) ?? fetchButtonElRef.current ?? null
+              setConfirmingFetch(true)
             },
           },
           h(FetchGlyph),
@@ -1862,11 +2078,27 @@ window.__ModuleLoader__.load({
                 ),
               )
 
+        // 确认后开始拉取，并在 fetch 结束后把焦点还给 Fetch 按钮。
+        const confirmFetch = () => {
+          refocusAfterFetchRef.current = true
+          runFetch({ remember: true })
+        }
+        const dismissFetchDialog = () => setConfirmingFetch(false)
+
         // 拉取前用模态框确认，拉取后用醒目且可关闭的横幅反馈结果。
         const fetchConfirmDialog = confirmingFetch
-          ? renderFetchConfirm(t, repos.length, runFetch, () => setConfirmingFetch(false))
+          ? renderFetchConfirm(t, repos.length, confirmFetch, dismissFetchDialog, fetchDialogRef)
           : null
-        const fetchToast = fetchReport === null ? null : renderFetchToast(t, fetchReport, () => setFetchReport(null))
+        const fetchToast =
+          fetchReport === null
+            ? null
+            : renderFetchToast(
+                t,
+                fetchReport,
+                () => setFetchReport(null),
+                fetchDetailsOpen,
+                () => setFetchDetailsOpen((value) => !value),
+              )
 
         if (state.status === 'no-workspace') {
           return h(
@@ -2239,13 +2471,20 @@ window.__ModuleLoader__.load({
 
           return h(
             'div',
-            { className: 'gm-root', 'data-gm-status': changesState.status, 'data-gm-mode': 'changes' },
+            {
+              className: 'gm-root',
+              'data-gm-status': changesState.status,
+              'data-gm-mode': 'changes',
+              ref: rootRef,
+            },
             h('style', null, STYLE),
             toolbar,
             diffErrorBanner,
             changesBar,
             changeChips,
             changesBody,
+            fetchConfirmDialog,
+            fetchToast,
           )
         }
 
@@ -2624,7 +2863,7 @@ window.__ModuleLoader__.load({
 
         return h(
           'div',
-          { className: 'gm-root', 'data-gm-status': state.status, 'data-gm-mode': 'history' },
+          { className: 'gm-root', 'data-gm-status': state.status, 'data-gm-mode': 'history', ref: rootRef },
           h('style', null, STYLE),
           toolbar,
           fetchConfirmDialog,

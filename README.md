@@ -60,7 +60,9 @@ In the commit history view, click a commit to expand its details, then click a f
 | Button | Action |
 | --- | --- |
 | Refresh | Reread local history, working-tree changes and repository status without fetching remote updates. |
-| Fetch | Run `git fetch --all --prune` in the discovered repositories, then refresh. When repositories are known, the view asks for confirmation first. |
+| Fetch | Run `git fetch --all --prune` in the discovered repositories, then refresh. When repositories are known, a confirmation dialog explains the repository count and read-only behavior before starting. |
+
+The confirmation is remembered per workspace for 10 minutes in the current page session only: a reload asks again, the memory is never written to disk, and a failed or empty fetch does not skip the next confirmation. Result feedback appears in a dismissible banner. Successful fetches close automatically after 3 seconds; partial failures, timeouts and errors stay until dismissed, and their per-repository details (including skipped non-repository directories) can be expanded. A timeout is reported as a timeout, never as success, and the banner stays visible when switching between commit history and working tree changes.
 
 The changes view keeps only the refresh button; fetch and go-to-HEAD actions belong to the commit history view.
 

@@ -6,8 +6,7 @@ All notable changes to this project are documented here. Versions follow [Semant
 
 ### Changed
 
-- Fetch feedback is now explicit: clicking **Fetch** opens a confirmation dialog (title, repository count, read-only explanation, explicit start/cancel, `Esc` to close). After one confirmation the dialog is skipped for 10 minutes, and the result is reported in a prominent banner (success, partial failures, timeouts, errors) that auto-dismisses after 3 seconds and can also be closed manually.
-
+- Fetch feedback is now explicit. Clicking **Fetch** opens an accessible confirmation dialog (title, repository count, read-only explanation, explicit start/cancel, `Esc` to close, focus is trapped inside and restored afterwards, and the page behind is inert while it is open). The confirmation is remembered per workspace for 10 minutes in the current page session only; it is recorded after a successful non-empty fetch, so a failed or empty fetch asks again, and a page reload asks again. Results appear in a prominent dismissible banner with four states — success, partial failure, timeout and error — and per-repository details for failures and skipped non-repository directories, plus a note when a timeout leaves the remaining repositories unattempted. Successful results auto-dismiss after 3 seconds; failure states stay until dismissed or the next fetch. The banner and dialog stay visible across the commit-history and working-tree-changes views.
 
 ## 0.2.0 — 2026-11-11
 

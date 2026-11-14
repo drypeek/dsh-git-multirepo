@@ -95,10 +95,33 @@ class HookRenderer {
   }
 }
 
-function fakeReact() {
+function fakeReact(options = {}) {
+  const documentStub = options.document ?? null
   const React = {
     createElement(type, props, ...children) {
-      return { type, props: props ?? {}, children: children.flat(Infinity).filter((child) => child !== null && child !== undefined && child !== false) }
+      const element = {
+        type,
+        props: props ?? {},
+        children: children.flat(Infinity).filter((child) => child !== null && child !== undefined && child !== false),
+      }
+      // 模拟 React 的 ref 挂载：对象 ref 的 current 指向元素本身。
+      const ref = element.props.ref
+      if (ref !== null && ref !== undefined && typeof ref === 'object') ref.current = element
+      element.focus = () => {
+        if (documentStub !== null) documentStub.activeElement = element
+      }
+      element.querySelectorAll = () => {
+        const found = []
+        const walk = (node) => {
+          for (const child of node.children ?? []) {
+            if (child !== null && child !== undefined && child.type === 'button') found.push(child)
+            if (child !== null && child !== undefined && child.children !== undefined) walk(child)
+          }
+        }
+        walk(element)
+        return found
+      }
+      return element
     },
     useState(initial) {
       return HookRenderer.current.useState(initial)
@@ -117,6 +140,80 @@ function fakeReact() {
     },
   }
   return React
+}
+
+/** 最小 DOM 桩：只提供对话框焦点陷阱、滚动锁和焦点恢复所需的接口。 */
+function fakeDocument() {
+  const listeners = new Map()
+  const documentStub = {
+    activeElement: null,
+    body: { style: { overflow: '' } },
+    addEventListener(type, handler) {
+      if (!listeners.has(type)) listeners.set(type, new Set())
+      listeners.get(type).add(handler)
+    },
+    removeEventListener(type, handler) {
+      listeners.get(type)?.delete(handler)
+    },
+    dispatch(type, event) {
+      for (const handler of [...(listeners.get(type) ?? [])]) handler(event)
+    },
+    listenerCount(type) {
+      return (listeners.get(type) ?? new Set()).size
+    },
+  }
+  return documentStub
+}
+
+/** 可控的假定时器：记录回调和延迟，便于断言自动关闭与清理。 */
+function fakeTimers() {
+  let nextId = 1
+  const timers = new Map()
+  return {
+    setTimeout(callback, delay) {
+      const id = nextId
+      nextId += 1
+      timers.set(id, { callback, delay })
+      return id
+    },
+    clearTimeout(id) {
+      timers.delete(id)
+    },
+    pendingCount() {
+      return timers.size
+    },
+    delays() {
+      return [...timers.values()].map((timer) => timer.delay)
+    },
+    runAll() {
+      while (timers.size > 0) {
+        const [id, timer] = timers.entries().next().value
+        timers.delete(id)
+        timer.callback()
+      }
+    },
+  }
+}
+
+/** 可控时钟：Date.now() 与 new Date() 都使用可变时间。 */
+function fakeClock(start = 1_700_000_000_000) {
+  let now = start
+  class FakeDate extends Date {
+    constructor(...args) {
+      if (args.length === 0) super(now)
+      else super(...args)
+    }
+
+    static now() {
+      return now
+    }
+  }
+  return {
+    Date: FakeDate,
+    advance(ms) {
+      now += ms
+    },
+  }
 }
 
 function textContent(node) {
@@ -187,8 +284,8 @@ function detailValue(hash, subject = 'DETAIL') {
   }
 }
 
-function loadClient(fetchImpl, localStorage = new Map()) {
-  const React = fakeReact()
+function loadClient(fetchImpl, localStorage = new Map(), options = {}) {
+  const React = fakeReact({ document: options.document })
   const registrations = new Map()
   const openedTabs = []
   const dictionaries = new Map()
@@ -221,6 +318,10 @@ function loadClient(fetchImpl, localStorage = new Map()) {
     AbortController,
     getComputedStyle: () => ({ overflowY: 'visible' }),
   }
+  if (options.document !== undefined) sandbox.document = options.document
+  if (options.setTimeout !== undefined) sandbox.setTimeout = options.setTimeout
+  if (options.clearTimeout !== undefined) sandbox.clearTimeout = options.clearTimeout
+  if (options.Date !== undefined) sandbox.Date = options.Date
   vm.runInNewContext(source, sandbox, { filename: 'client.js' })
   const translate = (key) => key
   const ctx = {
@@ -434,11 +535,15 @@ test('late Fetch completion cannot finish a newer Fetch', async () => {
   const nextFetchButton = findOne(renderer.tree, (node) => node.type === 'button' && node.props?.title?.startsWith('action.fetchHint'))
   nextFetchButton.props.onClick()
   await renderer.flush()
-  assert.equal(
+  // 确认按工作区记忆：换了工作区必须重新询问，而不是沿用旧工作区的确认。
+  assert.ok(
     findOne(renderer.tree, (node) => node.props?.role === 'dialog'),
-    undefined,
-    'a recent confirmation should skip the dialog',
+    'a different workspace should ask for confirmation again',
   )
+  const confirmNext = findOne(renderer.tree, (node) => node.type === 'button' && textContent(node) === 'fetch.confirmYes')
+  assert.ok(confirmNext)
+  confirmNext.props.onClick()
+  await renderer.flush()
   const newFetch = deferredRequest(requests, 'fetch', renderer.cwd)
   oldFetch.resolve({ failed: 0, results: [] })
   await renderer.flush()
@@ -580,6 +685,377 @@ test('fetch confirmations are reused for a short while after one confirmation', 
   deferredRequest(requests, 'fetch', renderer.cwd).resolve({ failed: 0, results: [] })
   await renderer.flush()
   renderer.unmount()
+})
+
+test('fetch timeouts are reported as timeouts, never as success', async () => {
+  const requests = []
+  const client = loadClient(requestFetch(requests))
+  const renderer = new HookRenderer(client.view, null)
+  renderer.cwd = 'C:/timeout-workspace'
+  renderer.props = viewProps(renderer)
+  renderer.render()
+  deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'TIMEOUT', 'a'.repeat(40)))
+  await renderer.flush()
+
+  const start = () =>
+    findOne(renderer.tree, (node) => node.type === 'button' && node.props?.title?.startsWith('action.fetchHint')).props.onClick()
+  start()
+  await renderer.flush()
+  findOne(renderer.tree, (node) => node.type === 'button' && textContent(node) === 'fetch.confirmYes').props.onClick()
+  await renderer.flush()
+  deferredRequest(requests, 'fetch', renderer.cwd).resolve({ timedOut: true, failed: 0, results: [{ name: 'repo', ok: true }] })
+  await renderer.flush()
+
+  const banner = findOne(renderer.tree, (node) => node.props?.['data-gm-fetch-report'] === 'timeout')
+  assert.ok(banner, 'a timed out fetch must be reported as a timeout')
+  assert.equal(banner.props.role, 'alert')
+  assert.match(banner.props.className, /gm-fetch-toast-timeout/)
+  assert.doesNotMatch(banner.props.className, /gm-fetch-toast-ok/, 'timeout must not be styled as success')
+  assert.ok(textContent(banner).includes('fetch.timeoutTitle'), 'timeout banner needs the timeout title')
+  assert.ok(textContent(banner).includes('fetch.timedOut'), 'timeout banner needs the timeout explanation')
+  renderer.unmount()
+})
+
+test('timeout and failure banners expose per-repository details and skipped roots', async () => {
+  const requests = []
+  const client = loadClient(requestFetch(requests))
+  const renderer = new HookRenderer(client.view, null)
+  renderer.cwd = 'C:/detail-workspace'
+  renderer.props = viewProps(renderer)
+  renderer.render()
+  deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'DETAILS', 'c'.repeat(40)))
+  await renderer.flush()
+
+  const start = () =>
+    findOne(renderer.tree, (node) => node.type === 'button' && node.props?.title?.startsWith('action.fetchHint')).props.onClick()
+  start()
+  await renderer.flush()
+  findOne(renderer.tree, (node) => node.type === 'button' && textContent(node) === 'fetch.confirmYes').props.onClick()
+  await renderer.flush()
+  deferredRequest(requests, 'fetch', renderer.cwd).resolve({
+    timedOut: true,
+    failed: 1,
+    results: [
+      { name: 'repo-a', ok: true },
+      { name: 'repo-b', ok: false, message: 'fatal: could not read from remote' },
+    ],
+  })
+  await renderer.flush()
+
+  let banner = findOne(renderer.tree, (node) => node.props?.['data-gm-fetch-report'] === 'timeout')
+  assert.ok(banner, 'timeout with failures must keep the timeout state')
+  assert.ok(textContent(banner).includes('fetch.timeoutWithFailures'), 'timeout detail must mention failed repositories')
+  const toggle = findOne(banner, (node) => node.type === 'button' && node.props?.className === 'gm-fetch-toast-more')
+  assert.ok(toggle, 'failure banner needs an expandable details control')
+  assert.equal(toggle.props['aria-expanded'], 'false')
+  toggle.props.onClick()
+  await renderer.flush()
+
+  banner = findOne(renderer.tree, (node) => node.props?.['data-gm-fetch-report'] === 'timeout')
+  assert.ok(banner)
+  const details = findOne(banner, (node) => node.props?.className === 'gm-fetch-toast-details')
+  assert.ok(details, 'expanded failure banner must render details')
+  const detailsText = textContent(details)
+  assert.ok(detailsText.includes('repo-b'), 'details must name the failed repository')
+  assert.ok(detailsText.includes('fatal: could not read from remote'), 'details must show the failure message')
+  assert.ok(detailsText.includes('fetch.untriedNote'), 'timeout details must explain the untried repositories')
+
+  // 扫描时跳过的非仓库目录是信息，不是失败：整体仍算成功，并在详情里单独标注。
+  deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'DETAILS', 'c'.repeat(40)))
+  await renderer.flush()
+  start()
+  await renderer.flush()
+  deferredRequest(requests, 'fetch', renderer.cwd).resolve({
+    failed: 0,
+    timedOut: false,
+    results: [
+      { name: 'repo', ok: true },
+      { name: 'not-a-repo', ok: false, message: 'not-a-repository-root' },
+    ],
+  })
+  await renderer.flush()
+
+  banner = findOne(renderer.tree, (node) => node.props?.['data-gm-fetch-report'] === 'ok')
+  assert.ok(banner, 'skipped non-repository roots must not turn a successful fetch into a failure')
+  assert.equal(banner.props.role, 'status')
+  assert.ok(textContent(banner).includes('fetch.ok'))
+  findOne(banner, (node) => node.type === 'button' && node.props?.className === 'gm-fetch-toast-more').props.onClick()
+  await renderer.flush()
+  banner = findOne(renderer.tree, (node) => node.props?.['data-gm-fetch-report'] === 'ok')
+  const skippedText = textContent(findOne(banner, (node) => node.props?.className === 'gm-fetch-toast-details'))
+  assert.ok(skippedText.includes('not-a-repo'))
+  assert.ok(skippedText.includes('fetch.skippedRoot'))
+  renderer.unmount()
+})
+
+test('successful fetch banners auto-dismiss while failures persist and timers are cleaned', async () => {
+  const requests = []
+  const timers = fakeTimers()
+  const client = loadClient(requestFetch(requests), new Map(), {
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+  })
+  const renderer = new HookRenderer(client.view, null)
+  renderer.cwd = 'C:/timers-workspace'
+  renderer.props = viewProps(renderer)
+  renderer.render()
+  deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'TIMERS', 'd'.repeat(40)))
+  await renderer.flush()
+
+  const start = () =>
+    findOne(renderer.tree, (node) => node.type === 'button' && node.props?.title?.startsWith('action.fetchHint')).props.onClick()
+  start()
+  await renderer.flush()
+  findOne(renderer.tree, (node) => node.type === 'button' && textContent(node) === 'fetch.confirmYes').props.onClick()
+  await renderer.flush()
+  deferredRequest(requests, 'fetch', renderer.cwd).resolve({ failed: 0, results: [{ name: 'repo', ok: true }] })
+  await renderer.flush()
+  assert.ok(findOne(renderer.tree, (node) => node.props?.['data-gm-fetch-report'] === 'ok'))
+  assert.equal(timers.pendingCount(), 1, 'success banner must schedule one dismissal timer')
+  assert.deepEqual(timers.delays(), [3000])
+
+  // 自动关闭：时间到后横幅消失。
+  timers.runAll()
+  await renderer.flush()
+  assert.equal(findOne(renderer.tree, (node) => node.props?.['data-gm-fetch-report']), undefined)
+
+  // 新的 fetch 开始时清理上一个横幅的定时器。
+  deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'TIMERS', 'd'.repeat(40)))
+  await renderer.flush()
+  start()
+  await renderer.flush()
+  deferredRequest(requests, 'fetch', renderer.cwd).resolve({ failed: 0, results: [{ name: 'repo', ok: true }] })
+  await renderer.flush()
+  assert.equal(timers.pendingCount(), 1)
+  start()
+  await renderer.flush()
+  assert.equal(timers.pendingCount(), 0, 'starting a new fetch must clear the old banner timer')
+  deferredRequest(requests, 'fetch', renderer.cwd).reject(new Error('network down'))
+  await renderer.flush()
+  const failure = findOne(renderer.tree, (node) => node.props?.['data-gm-fetch-report'] === 'error')
+  assert.ok(failure, 'failed fetch must show an error banner')
+  assert.equal(timers.pendingCount(), 0, 'failure banners must not auto-dismiss')
+  timers.runAll()
+  await renderer.flush()
+  assert.ok(findOne(renderer.tree, (node) => node.props?.['data-gm-fetch-report'] === 'error'), 'failure banner persists')
+  const dismiss = findOne(renderer.tree, (node) => node.type === 'button' && node.props?.['aria-label'] === 'fetch.dismiss')
+  dismiss.props.onClick()
+  await renderer.flush()
+  assert.equal(findOne(renderer.tree, (node) => node.props?.['data-gm-fetch-report']), undefined)
+  renderer.unmount()
+})
+
+test('fetch feedback follows the mode switch into the changes view', async () => {
+  const requests = []
+  const client = loadClient(requestFetch(requests))
+  const renderer = new HookRenderer(client.view, null)
+  renderer.cwd = 'C:/mode-workspace'
+  renderer.props = viewProps(renderer)
+  renderer.render()
+  deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'MODE', 'e'.repeat(40)))
+  await renderer.flush()
+
+  findOne(renderer.tree, (node) => node.type === 'button' && node.props?.title?.startsWith('action.fetchHint')).props.onClick()
+  await renderer.flush()
+  findOne(renderer.tree, (node) => node.type === 'button' && textContent(node) === 'fetch.confirmYes').props.onClick()
+  await renderer.flush()
+
+  clickMode(renderer, 'changes')
+  await renderer.flush()
+  assert.ok(findOne(renderer.tree, (node) => node.props?.['data-gm-mode'] === 'changes'))
+
+  const fetchRequest = deferredRequest(requests, 'fetch', renderer.cwd)
+  fetchRequest.resolve({ failed: 1, results: [{ name: 'repo', ok: false, message: 'boom' }] })
+  await renderer.flush()
+  const banner = findOne(renderer.tree, (node) => node.props?.['data-gm-fetch-report'] === 'partial')
+  assert.ok(banner, 'the result banner must stay visible after switching to the changes view')
+  assert.ok(textContent(banner).includes('fetch.partialTitle'))
+  findOne(banner, (node) => node.type === 'button' && node.props?.['aria-label'] === 'fetch.dismiss').props.onClick()
+  await renderer.flush()
+  assert.equal(findOne(renderer.tree, (node) => node.props?.['data-gm-fetch-report']), undefined)
+  renderer.unmount()
+})
+
+test('fetch confirmation is remembered per workspace for ten minutes in the page session', async () => {
+  const clock = fakeClock()
+  const requests = []
+  const client = loadClient(requestFetch(requests), new Map(), { Date: clock.Date })
+  const renderer = new HookRenderer(client.view, null)
+  renderer.cwd = 'C:/ttl-workspace'
+  renderer.props = viewProps(renderer)
+  renderer.render()
+  deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'TTL', 'f'.repeat(40)))
+  await renderer.flush()
+
+  const start = () =>
+    findOne(renderer.tree, (node) => node.type === 'button' && node.props?.title?.startsWith('action.fetchHint')).props.onClick()
+  const dialogOpen = () => findOne(renderer.tree, (node) => node.props?.role === 'dialog') !== undefined
+
+  start()
+  await renderer.flush()
+  assert.ok(dialogOpen(), 'first fetch in a workspace must ask for confirmation')
+  findOne(renderer.tree, (node) => node.type === 'button' && textContent(node) === 'fetch.confirmYes').props.onClick()
+  await renderer.flush()
+  deferredRequest(requests, 'fetch', renderer.cwd).resolve({ failed: 0, results: [{ name: 'repo', ok: true }] })
+  await renderer.flush()
+
+  deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'TTL', 'f'.repeat(40)))
+  await renderer.flush()
+  clock.advance(9 * 60 * 1000)
+  start()
+  await renderer.flush()
+  assert.equal(dialogOpen(), false, 'a confirmed workspace must not ask again within ten minutes')
+  deferredRequest(requests, 'fetch', renderer.cwd).resolve({ failed: 0, results: [{ name: 'repo', ok: true }] })
+  await renderer.flush()
+
+  clock.advance(2 * 60 * 1000)
+  start()
+  await renderer.flush()
+  assert.ok(dialogOpen(), 'the confirmation window must expire after ten minutes')
+  findOne(renderer.tree, (node) => node.type === 'button' && textContent(node) === 'fetch.confirmNo').props.onClick()
+  await renderer.flush()
+
+  // 换一个工作区：确认按 cwd 隔离。
+  renderer.cwd = 'C:/ttl-other'
+  renderer.props = viewProps(renderer)
+  renderer.render()
+  deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'OTHER', 'a'.repeat(40)))
+  await renderer.flush()
+  start()
+  await renderer.flush()
+  assert.ok(dialogOpen(), 'a different workspace must ask for confirmation again')
+  findOne(renderer.tree, (node) => node.type === 'button' && textContent(node) === 'fetch.confirmNo').props.onClick()
+  await renderer.flush()
+  renderer.unmount()
+
+  // 刷新页面 = 新的模块实例：内存里的确认记录不应跨页面会话保留。
+  const reloadRequests = []
+  const reloaded = loadClient(requestFetch(reloadRequests), new Map(), { Date: clock.Date })
+  const reloadedRenderer = new HookRenderer(reloaded.view, null)
+  reloadedRenderer.cwd = 'C:/ttl-workspace'
+  reloadedRenderer.props = viewProps(reloadedRenderer)
+  reloadedRenderer.render()
+  deferredRequest(reloadRequests, 'state', reloadedRenderer.cwd).resolve(stateValue(reloadedRenderer.cwd, 'TTL', 'f'.repeat(40)))
+  await reloadedRenderer.flush()
+  findOne(reloadedRenderer.tree, (node) => node.type === 'button' && node.props?.title?.startsWith('action.fetchHint')).props.onClick()
+  await reloadedRenderer.flush()
+  assert.ok(
+    findOne(reloadedRenderer.tree, (node) => node.props?.role === 'dialog'),
+    'a page reload must ask for confirmation again',
+  )
+  reloadedRenderer.unmount()
+})
+
+test('failed or empty fetches do not skip the next confirmation', async () => {
+  const requests = []
+  const client = loadClient(requestFetch(requests))
+  const renderer = new HookRenderer(client.view, null)
+  renderer.cwd = 'C:/not-remembered'
+  renderer.props = viewProps(renderer)
+  renderer.render()
+  deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'FAIL', 'b'.repeat(40)))
+  await renderer.flush()
+
+  const start = () =>
+    findOne(renderer.tree, (node) => node.type === 'button' && node.props?.title?.startsWith('action.fetchHint')).props.onClick()
+  const dialogOpen = () => findOne(renderer.tree, (node) => node.props?.role === 'dialog') !== undefined
+
+  start()
+  await renderer.flush()
+  findOne(renderer.tree, (node) => node.type === 'button' && textContent(node) === 'fetch.confirmYes').props.onClick()
+  await renderer.flush()
+  deferredRequest(requests, 'fetch', renderer.cwd).reject(new Error('network down'))
+  await renderer.flush()
+  assert.ok(findOne(renderer.tree, (node) => node.props?.['data-gm-fetch-report'] === 'error'))
+  start()
+  await renderer.flush()
+  assert.ok(dialogOpen(), 'a failed fetch must not be remembered as a confirmation')
+  findOne(renderer.tree, (node) => node.type === 'button' && textContent(node) === 'fetch.confirmNo').props.onClick()
+  await renderer.flush()
+
+  // 空仓库列表不弹确认，也不记录确认状态；凑够仓库后仍需确认。
+  const emptyValue = stateValue(renderer.cwd, 'EMPTY', 'b'.repeat(40))
+  emptyValue.repos = []
+  emptyValue.total = 0
+  findOne(renderer.tree, (node) => node.type === 'button' && node.props?.title === 'branch.allHint').props.onClick()
+  await renderer.flush()
+  deferredRequest(requests, 'state', renderer.cwd).resolve(emptyValue)
+  await renderer.flush()
+  start()
+  await renderer.flush()
+  assert.equal(dialogOpen(), false, 'an empty repository list fetches without a confirmation')
+  deferredRequest(requests, 'fetch', renderer.cwd).resolve({ failed: 0, results: [] })
+  await renderer.flush()
+
+  findOne(renderer.tree, (node) => node.type === 'button' && node.props?.title === 'branch.currentHint').props.onClick()
+  await renderer.flush()
+  deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'REFILLED', 'b'.repeat(40)))
+  await renderer.flush()
+  start()
+  await renderer.flush()
+  assert.ok(dialogOpen(), 'an empty fetch must not be remembered as a confirmation')
+  findOne(renderer.tree, (node) => node.type === 'button' && textContent(node) === 'fetch.confirmNo').props.onClick()
+  await renderer.flush()
+  renderer.unmount()
+})
+
+test('fetch confirmation traps focus, locks scrolling and restores focus', async () => {
+  const documentStub = fakeDocument()
+  const requests = []
+  const client = loadClient(requestFetch(requests), new Map(), { document: documentStub })
+  const renderer = new HookRenderer(client.view, null)
+  renderer.cwd = 'C:/a11y-workspace'
+  renderer.props = viewProps(renderer)
+  renderer.render()
+  deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'A11Y', '9'.repeat(40)))
+  await renderer.flush()
+
+  let previousFocusCount = 0
+  const previousFocus = {
+    focus() {
+      previousFocusCount += 1
+      documentStub.activeElement = this
+    },
+  }
+  documentStub.activeElement = previousFocus
+  findOne(renderer.tree, (node) => node.type === 'button' && node.props?.title?.startsWith('action.fetchHint')).props.onClick()
+  await renderer.flush()
+
+  const dialog = findOne(renderer.tree, (node) => node.props?.role === 'dialog')
+  assert.ok(dialog)
+  assert.equal(documentStub.body.style.overflow, 'hidden', 'the page behind the modal must not scroll')
+  assert.equal(documentStub.listenerCount('keydown'), 1)
+  assert.ok(dialog.props['aria-describedby'].includes('gm-fetch-confirm-note'), 'the retention note must be announced')
+  assert.ok(findOne(dialog, (node) => node.props?.id === 'gm-fetch-confirm-note'), 'the retention note needs the referenced id')
+
+  const focusables = dialog.querySelectorAll()
+  assert.ok(focusables.length >= 2, 'the dialog must expose its buttons to the focus trap')
+  documentStub.activeElement = focusables[focusables.length - 1]
+  let prevented = false
+  documentStub.dispatch('keydown', {
+    key: 'Tab',
+    shiftKey: false,
+    preventDefault() {
+      prevented = true
+    },
+  })
+  assert.equal(prevented, true, 'Tab at the end of the dialog must be intercepted')
+  assert.equal(documentStub.activeElement, focusables[0], 'Tab must wrap to the first dialog control')
+
+  documentStub.dispatch('keydown', { key: 'Escape', shiftKey: false, preventDefault() {} })
+  await renderer.flush()
+  assert.equal(findOne(renderer.tree, (node) => node.props?.role === 'dialog'), undefined)
+  assert.equal(documentStub.body.style.overflow, '', 'closing the dialog must restore scrolling')
+  assert.equal(documentStub.listenerCount('keydown'), 0, 'the dialog key listener must be removed')
+  assert.equal(previousFocusCount, 1, 'focus must return to the element that opened the dialog')
+
+  // 卸载时同样清理监听与滚动锁。
+  findOne(renderer.tree, (node) => node.type === 'button' && node.props?.title?.startsWith('action.fetchHint')).props.onClick()
+  await renderer.flush()
+  assert.equal(documentStub.listenerCount('keydown'), 1)
+  renderer.unmount()
+  assert.equal(documentStub.listenerCount('keydown'), 0)
+  assert.equal(documentStub.body.style.overflow, '')
 })
 
 test('restored diff tab title and body recover absent or empty navigation parameters', async () => {
