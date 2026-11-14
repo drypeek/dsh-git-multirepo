@@ -553,7 +553,7 @@ window.__ModuleLoader__.load({
     }
 
     /** 提交引用标记的正则；仓库名允许 URL 编码后出现 `]`、空格或 `@`。 */
-    const COMMIT_REFERENCE_PATTERN = /\[commit:([^\]\s]+?)@([0-9a-fA-F]{7,64})\]/g
+    const COMMIT_REFERENCE_PATTERN = /\[commit:([^\]\s]+?)@([0-9a-fA-F]{4,64})\]/g
 
     /** 提交操作菜单的 DOM id，供提交行的 aria-controls 引用。 */
     const COMMIT_MENU_ID = 'git-multirepo-commit-menu'
