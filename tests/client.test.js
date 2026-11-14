@@ -187,12 +187,28 @@ function detailValue(hash, subject = 'DETAIL') {
   }
 }
 
-function loadClient(fetchImpl, localStorage = new Map()) {
+function loadClient(fetchImpl, localStorage = new Map(), options = {}) {
   const React = fakeReact()
   const registrations = new Map()
   const openedTabs = []
   const dictionaries = new Map()
   const rules = []
+  const injected = []
+  const logs = { warn: [], error: [] }
+  const testConsole = {
+    log: (...args) => console.log(...args),
+    warn: (...args) => logs.warn.push(args.map((value) => String(value)).join(' ')),
+    error: (...args) => logs.error.push(args.map((value) => String(value)).join(' ')),
+  }
+  /** uiConversation 服务桩：正常路径由 ctx.get 取得，延迟路径由 ctx.inject 回调取得。 */
+  const uiConversation = {
+    userText: {
+      register: (rule) => {
+        rules.push(rule)
+        return () => {}
+      },
+    },
+  }
   const storage = {
     getItem(key) {
       return localStorage.has(key) ? localStorage.get(key) : null
@@ -213,13 +229,15 @@ function loadClient(fetchImpl, localStorage = new Map()) {
         },
       },
     },
-    console,
+    console: testConsole,
     fetch: fetchImpl,
     localStorage: storage,
     Response,
     URL,
     URLSearchParams,
     AbortController,
+    setTimeout,
+    clearTimeout,
     getComputedStyle: () => ({ overflowY: 'visible' }),
   }
   vm.runInNewContext(source, sandbox, { filename: 'client.js' })
@@ -227,6 +245,10 @@ function loadClient(fetchImpl, localStorage = new Map()) {
   const ctx = {
     get(name) {
       return ctx[name]
+    },
+    inject(deps, callback) {
+      injected.push({ deps, callback })
+      return () => {}
     },
     effect(start) {
       return start()
@@ -236,14 +258,6 @@ function loadClient(fetchImpl, localStorage = new Map()) {
       register: (namespace, value) => {
         dictionaries.set(namespace, value)
         return undefined
-      },
-    },
-    uiConversation: {
-      userText: {
-        register: (rule) => {
-          rules.push(rule)
-          return undefined
-        },
       },
     },
     sidebarRightTabs: { register: () => undefined },
@@ -262,6 +276,7 @@ function loadClient(fetchImpl, localStorage = new Map()) {
       },
     },
   }
+  if (options.uiConversation !== 'deferred') ctx.uiConversation = uiConversation
   sandbox.client.apply(ctx)
   return {
     view: registrations.get('conversation.view'),
@@ -271,6 +286,9 @@ function loadClient(fetchImpl, localStorage = new Map()) {
     openedTabs,
     dictionaries,
     rules,
+    injected,
+    logs,
+    uiConversation,
     registrations,
   }
 }
@@ -291,13 +309,11 @@ function requestFetch(requests) {
         ? 'commit'
         : pathname.endsWith('/fetch')
           ? 'fetch'
-          : pathname.endsWith('/chat')
-            ? 'chat'
-            : pathname.endsWith('/worktree-diff')
-              ? 'worktree-diff'
-              : pathname.endsWith('/worktree')
-                ? 'worktree'
-                : 'other'
+          : pathname.endsWith('/worktree-diff')
+            ? 'worktree-diff'
+            : pathname.endsWith('/worktree')
+              ? 'worktree'
+              : 'other'
     const root = parsed.searchParams.get('root') ?? parsed.searchParams.get('repo') ?? ''
     const request = { kind, root, options, url: parsed, settled: false }
     requests.push(request)
@@ -882,13 +898,21 @@ test('zh and en dictionaries expose identical keys', () => {
     'changes.openDiff',
     'changes.noMatch',
     'changes.refreshHint',
+    'chat.add',
+    'chat.addHint',
+    'chat.added',
+    'chat.addFailed',
+    'chat.dismiss',
+    'chat.menuHint',
+    'chat.menuLabel',
   ]
   for (const key of required) assert.ok(zhKeys.includes(key), `missing i18n key: ${key}`)
 })
 
-test('commit context menu inserts the commit into the chat input', async () => {
+test('commit context menu inserts the commit into the chat input and reports the result', async () => {
   const requests = []
   const inserted = []
+  const focusCalls = []
   const inputActions = {
     captureInsertion: () => ({ start: 0, end: 0, draftRev: 0 }),
     insertText: (text) => {
@@ -905,23 +929,34 @@ test('commit context menu inserts the commit into the chat input', async () => {
   deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'CHAT ME', hash))
   await renderer.flush()
 
+  const trigger = {
+    focus: () => focusCalls.push('focus'),
+    getBoundingClientRect: () => ({ left: 10, bottom: 40 }),
+  }
   const openMenu = async () => {
     const row = findOne(
       renderer.tree,
       (node) => typeof node.props?.onContextMenu === 'function' && node.props?.['data-gm-repo'] === 'repo',
     )
     assert.ok(row, 'commit row should expose a context menu')
-    row.props.onContextMenu({ preventDefault() {}, stopPropagation() {}, clientX: 20, clientY: 30 })
+    assert.equal(row.props['aria-haspopup'], 'menu', 'commit row announces its popup menu')
+    row.props.onContextMenu({ preventDefault() {}, stopPropagation() {}, currentTarget: trigger, clientX: 20, clientY: 30 })
     await renderer.flush()
     const menu = findOne(renderer.tree, (node) => node.props?.role === 'menu')
     assert.ok(menu, 'right-click should open the commit menu')
+    const rowAfter = findOne(
+      renderer.tree,
+      (node) => typeof node.props?.onContextMenu === 'function' && node.props?.['data-gm-repo'] === 'repo',
+    )
+    assert.equal(rowAfter.props['aria-expanded'], true, 'the open menu is announced on the row')
+    assert.equal(rowAfter.props['aria-controls'], menu.props.id, 'the row points at the open menu')
     const item = findOne(menu, (node) => node.type === 'button' && node.props?.role === 'menuitem')
     assert.ok(item, 'menu should offer an add-to-chat item')
+    assert.equal(item.props.title, 'chat.addHint', 'menu item explains what it does')
     return item
   }
 
   const item = await openMenu()
-  assert.equal(findOne(renderer.tree, (node) => node.props?.['data-gm-chat']), undefined, 'no always-visible button')
   item.props.onClick()
   await renderer.flush()
   assert.equal(
@@ -930,16 +965,84 @@ test('commit context menu inserts the commit into the chat input', async () => {
     'adding a reference must not send or fetch anything',
   )
   assert.deepEqual(inserted, [`[commit:repo@${hash.slice(0, 8)}]\n`], 'only a compact commit marker is inserted')
-  assert.doesNotMatch(textContent(renderer.tree), /chat\.add(?:ed|Failed)/, 'success is reported silently')
+  assert.deepEqual(focusCalls, ['focus'], 'focus returns to the commit row after closing the menu')
+  const notice = findOne(renderer.tree, (node) => node.props?.['data-gm-notice'] === 'ok')
+  assert.ok(notice, 'success should be visible')
+  assert.match(textContent(notice), /chat\.added/)
+  const dismiss = findOne(notice, (node) => node.props?.['aria-label'] === 'chat.dismiss')
+  assert.ok(dismiss, 'notice should be dismissible')
+  dismiss.props.onClick()
+  await renderer.flush()
+  assert.equal(findOne(renderer.tree, (node) => node.props?.['data-gm-notice'] !== undefined), undefined)
 
-  // 输入框正忙时插入失败：同样静默，不再插入，也不出现提示。
+  // 输入框正忙时 insertText 返回 false：不插入，但要显示可见失败提示。
   inputActions.insertText = () => false
   const retry = await openMenu()
   retry.props.onClick()
   await renderer.flush()
   assert.equal(inserted.length, 1)
-  assert.doesNotMatch(textContent(renderer.tree), /chat\.add(?:ed|Failed)/, 'failure is silent too')
+  const failure = findOne(renderer.tree, (node) => node.props?.['data-gm-notice'] === 'error')
+  assert.ok(failure, 'failure should not be silent')
+  assert.match(textContent(failure), /chat\.addFailed/)
   renderer.unmount()
+})
+
+test('changing the session workspace closes the commit menu and inserts with the new state', async () => {
+  const requests = []
+  const inserted = []
+  const inputActions = {
+    captureInsertion: () => ({ start: 0, end: 0, draftRev: 0 }),
+    insertText: (text) => {
+      inserted.push(text)
+      return true
+    },
+  }
+  const client = loadClient(requestFetch(requests))
+  const renderer = new HookRenderer(client.view, null)
+  renderer.cwd = 'C:/chat-workspace'
+  renderer.props = { ...viewProps(renderer), inputActions }
+  renderer.render()
+  deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'OLD', 'c'.repeat(40)))
+  await renderer.flush()
+
+  const row = findOne(renderer.tree, (node) => typeof node.props?.onContextMenu === 'function')
+  row.props.onContextMenu({ preventDefault() {}, stopPropagation() {}, clientX: 5, clientY: 5 })
+  await renderer.flush()
+  assert.ok(findOne(renderer.tree, (node) => node.props?.role === 'menu'), 'menu opens for the old cwd')
+
+  renderer.cwd = 'C:/chat-workspace-2'
+  renderer.render()
+  deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'NEW', 'd'.repeat(40)))
+  await renderer.flush()
+  assert.equal(findOne(renderer.tree, (node) => node.props?.role === 'menu'), undefined, 'cwd change closes the menu')
+
+  const nextRow = findOne(renderer.tree, (node) => typeof node.props?.onContextMenu === 'function')
+  nextRow.props.onContextMenu({ preventDefault() {}, stopPropagation() {}, clientX: 8, clientY: 8 })
+  await renderer.flush()
+  const item = findOne(renderer.tree, (node) => node.type === 'button' && node.props?.role === 'menuitem')
+  item.props.onClick()
+  await renderer.flush()
+  assert.equal(inserted.length, 1)
+  assert.match(inserted[0], /d{8}/, 'the marker comes from the current workspace state')
+  renderer.unmount()
+})
+
+test('commit reference rule defers registration when uiConversation is not ready', () => {
+  const client = loadClient(requestFetch([]), new Map(), { uiConversation: 'deferred' })
+  assert.equal(client.rules.length, 0, 'the rule must not be silently dropped without a trace')
+  assert.ok(
+    client.logs.warn.some((line) => line.includes('uiConversation')),
+    'a deferred registration must be logged',
+  )
+  assert.equal(client.injected.length, 1)
+  assert.equal(client.injected[0].deps.length, 1)
+  assert.equal(client.injected[0].deps[0], 'uiConversation')
+  client.injected[0].callback({
+    get: (name) => (name === 'uiConversation' ? client.uiConversation : undefined),
+    effect: (start) => start(),
+  })
+  assert.equal(client.rules.length, 1, 'the rule registers once the service becomes available')
+  assert.equal(client.rules[0].id, 'git-commit')
 })
 
 test('commit reference markers are matched and rendered as inline chips', () => {

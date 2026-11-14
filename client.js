@@ -56,6 +56,9 @@ window.__ModuleLoader__.load({
       'chat.addHint': '把该提交的引用插入对话输入框，再输入你的问题',
       'chat.menuLabel': '提交操作',
       'chat.menuHint': '右键添加到对话',
+      'chat.added': '已添加到对话',
+      'chat.addFailed': '添加到对话失败，请重试',
+      'chat.dismiss': '关闭提示',
       'fetch.ok': '已拉取 {count} 个仓库',
       'fetch.partial': '已拉取，{count} 个仓库失败',
       'fetch.error': '拉取请求失败：{message}',
@@ -191,6 +194,9 @@ window.__ModuleLoader__.load({
       'chat.addHint': 'Insert a reference to this commit into the chat input, then write your question',
       'chat.menuLabel': 'Commit actions',
       'chat.menuHint': 'Right-click to add to chat',
+      'chat.added': 'Added to chat',
+      'chat.addFailed': 'Could not add to chat; please try again',
+      'chat.dismiss': 'Dismiss',
       'fetch.ok': 'Fetched {count} repositories',
       'fetch.partial': 'Fetched, {count} failed',
       'fetch.error': 'Fetch request failed: {message}',
@@ -548,6 +554,9 @@ window.__ModuleLoader__.load({
 
     /** 提交引用标记的正则；仓库名允许 URL 编码后出现 `]`、空格或 `@`。 */
     const COMMIT_REFERENCE_PATTERN = /\[commit:([^\]\s]+?)@([0-9a-fA-F]{7,64})\]/g
+
+    /** 提交操作菜单的 DOM id，供提交行的 aria-controls 引用。 */
+    const COMMIT_MENU_ID = 'git-multirepo-commit-menu'
 
     /** UserText 规则：把 `[commit:repo@hash]` 标记解析成行内节点。 */
     const COMMIT_REFERENCE_RULE = {
@@ -1116,6 +1125,7 @@ window.__ModuleLoader__.load({
         const [fetching, setFetching] = useState(false)
         const [fetchReport, setFetchReport] = useState(null)
         const [chatMenu, setChatMenu] = useState(null)
+        const [chatNotice, setChatNotice] = useState(null)
         const [state, setState] = useState({ status: 'idle', data: null, failure: null, key: '' })
         const [confirmingFetch, setConfirmingFetch] = useState(false)
         const [openDiffError, setOpenDiffError] = useState(null)
@@ -1133,6 +1143,16 @@ window.__ModuleLoader__.load({
         // Keep the current view identity available to async callbacks immediately after a render.
         viewKeyRef.current = viewKey
         workspaceKeyRef.current = cwd
+        /** 打开菜单的提交行元素；菜单关闭后把键盘焦点还给它。 */
+        const menuTriggerRef = useRef(null)
+        /** 提示自动消失的定时器。 */
+        const noticeTimerRef = useRef(null)
+        /** 当前工作区已加载的仓库名集合，用于校验提交是否属于当前 workspace。 */
+        const knownRepoNamesRef = useRef(new Set())
+        {
+          const repos = Array.isArray(state.data?.repos) ? state.data.repos : []
+          knownRepoNamesRef.current = new Set(repos.map((repo) => repo?.name).filter((name) => typeof name === 'string'))
+        }
 
         /** 打开右侧栏差异页签；失败时把原因显示在视图里而不是抛出。 */
         const openDiffSafe = useCallback(
@@ -1158,12 +1178,26 @@ window.__ModuleLoader__.load({
           [openWorktreeDiff],
         )
 
+        /** 关闭提交操作菜单；焦点由下面的 effect 还给触发它的提交行。 */
+        const closeChatMenu = useCallback(() => setChatMenu(null), [])
+
+        /** 显示一条会自动消失的状态提示，并在下一次提示时重置计时。 */
+        const showChatNotice = useCallback((kind, message) => {
+          setChatNotice({ kind, message })
+          if (noticeTimerRef.current !== null) clearTimeout(noticeTimerRef.current)
+          noticeTimerRef.current = setTimeout(() => {
+            noticeTimerRef.current = null
+            setChatNotice(null)
+          }, 4000)
+        }, [])
+
         useEffect(
           () => () => {
             fetchAbortRef.current?.abort()
             changesAbortRef.current?.abort()
             for (const controller of detailAbortsRef.current.values()) controller.abort()
             detailAbortsRef.current.clear()
+            if (noticeTimerRef.current !== null) clearTimeout(noticeTimerRef.current)
           },
           [],
         )
@@ -1186,6 +1220,14 @@ window.__ModuleLoader__.load({
           setOpenDiffError(null)
           setCollapsedChangeRepos([])
           setChangesState({ status: 'idle', data: null, failure: null, key: '' })
+          // 菜单与提示都属于旧工作区，切换 cwd 后不能继续操作旧的提交。
+          setChatMenu(null)
+          setChatNotice(null)
+          menuTriggerRef.current = null
+          if (noticeTimerRef.current !== null) {
+            clearTimeout(noticeTimerRef.current)
+            noticeTimerRef.current = null
+          }
         }, [cwd])
 
         // Search and time filters belong to a workspace, so do not carry them into a new cwd.
@@ -1194,11 +1236,19 @@ window.__ModuleLoader__.load({
           setTimeRange('all')
         }, [cwd])
 
+        // 菜单关闭后把焦点还给触发它的提交行，避免焦点落到 body。
+        useEffect(() => {
+          if (chatMenu !== null) return
+          const trigger = menuTriggerRef.current
+          menuTriggerRef.current = null
+          if (trigger !== null && typeof trigger.focus === 'function') trigger.focus()
+        }, [chatMenu])
+
         // 右键菜单在页面滚动或按 Esc 时关闭；测试环境的 DOM 桩下跳过绑定。
         useEffect(() => {
           if (chatMenu === null) return undefined
           if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') return undefined
-          const close = () => setChatMenu(null)
+          const close = closeChatMenu
           const onKeyDown = (event) => {
             if (event.key === 'Escape') close()
           }
@@ -1209,7 +1259,7 @@ window.__ModuleLoader__.load({
             document.removeEventListener('keydown', onKeyDown)
             scroller?.removeEventListener('scroll', close, true)
           }
-        }, [chatMenu])
+        }, [chatMenu, closeChatMenu])
 
         useEffect(() => {
           if (typeof cwd !== 'string' || cwd === '') {
@@ -1604,13 +1654,16 @@ window.__ModuleLoader__.load({
             })
         }, [cwd, t])
 
-        /** 把提交引用插入当前对话输入框；失败时静默，不打扰用户。 */
+        /** 把提交引用插入当前对话输入框；返回是否真正插入成功，供调用方提示。 */
         const attachToChat = useCallback(
           (commit) => {
-            if (typeof cwd !== 'string' || cwd === '') return
-            if (typeof commit.hash !== 'string' || commit.hash === '') return
-            if (typeof inputActions?.captureInsertion !== 'function' || typeof inputActions?.insertText !== 'function') return
-            inputActions.insertText(commitReference(commit), inputActions.captureInsertion())
+            if (typeof cwd !== 'string' || cwd === '') return false
+            if (typeof commit?.hash !== 'string' || commit.hash === '') return false
+            // commit.repo 是工作区相对仓库名；只有当前工作区加载出的仓库才允许插入，
+            // 避免 cwd 切换后把旧 workspace 的提交引用发进新对话。
+            if (typeof commit?.repo !== 'string' || !knownRepoNamesRef.current.has(commit.repo)) return false
+            if (typeof inputActions?.captureInsertion !== 'function' || typeof inputActions?.insertText !== 'function') return false
+            return inputActions.insertText(commitReference(commit), inputActions.captureInsertion()) === true
           },
           [cwd, inputActions],
         )
@@ -1778,10 +1831,11 @@ window.__ModuleLoader__.load({
             ? null
             : h(
                 'div',
-                { className: 'gm-menu-layer', onClick: () => setChatMenu(null) },
+                { className: 'gm-menu-layer', onClick: closeChatMenu },
                 h(
                   'div',
                   {
+                    id: COMMIT_MENU_ID,
                     className: 'gm-menu',
                     role: 'menu',
                     'aria-label': t('chat.menuLabel'),
@@ -1799,14 +1853,36 @@ window.__ModuleLoader__.load({
                       role: 'menuitem',
                       className: 'gm-menu-item',
                       autoFocus: true,
+                      title: t('chat.addHint'),
                       onClick: () => {
                         const commit = chatMenu.commit
-                        setChatMenu(null)
-                        attachToChat(commit)
+                        closeChatMenu()
+                        const inserted = attachToChat(commit)
+                        showChatNotice(inserted ? 'ok' : 'error', t(inserted ? 'chat.added' : 'chat.addFailed'))
                       },
                     },
                     t('chat.add'),
                   ),
+                ),
+              )
+
+        // 插入成功/失败都用可关闭、会自动消失的提示反馈，不再静默失败。
+        const chatNoticeBanner =
+          chatNotice === null
+            ? null
+            : h(
+                'div',
+                { className: 'gm-confirm', role: 'status', 'aria-live': 'polite', 'data-gm-notice': chatNotice.kind },
+                h('span', { className: 'gm-confirm-text' }, chatNotice.message),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'gm-tool',
+                    'aria-label': t('chat.dismiss'),
+                    onClick: () => setChatNotice(null),
+                  },
+                  t('chat.dismiss'),
                 ),
               )
 
@@ -2341,6 +2417,7 @@ window.__ModuleLoader__.load({
         const pushRow = (commit) => {
           const key = getDetailKey(commit)
           const expanded = expandedKey === key
+          const menuOpen = chatMenu !== null && chatMenu.key === key
           const color = colors.get(commit.repo) ?? PALETTE[0]
           const source = branchLabel(commit, repoInfo.get(commit.repo), allBranches)
           const refs = extraRefs(commit.refs, source)
@@ -2357,7 +2434,9 @@ window.__ModuleLoader__.load({
                     .join(' '),
                   role: 'button',
                   tabIndex: 0,
-                  'aria-expanded': expanded,
+                  'aria-expanded': menuOpen ? true : expanded,
+                  'aria-haspopup': 'menu',
+                  'aria-controls': menuOpen ? COMMIT_MENU_ID : undefined,
                   title: `${commit.remoteOnly === true ? t('badge.remoteHint') : t('detail.expand')} · ${t('chat.menuHint')}`,
                   onClick: activate,
                   onKeyDown: (event) => {
@@ -2372,8 +2451,10 @@ window.__ModuleLoader__.load({
                       const rect = typeof event.currentTarget?.getBoundingClientRect === 'function'
                         ? event.currentTarget.getBoundingClientRect()
                         : null
+                      menuTriggerRef.current = event.currentTarget ?? null
                       setChatMenu({
                         commit,
+                        key,
                         x: rect === null ? 0 : rect.left + 8,
                         y: rect === null ? 0 : rect.bottom + 4,
                       })
@@ -2382,8 +2463,10 @@ window.__ModuleLoader__.load({
                   onContextMenu: (event) => {
                     event.preventDefault()
                     event.stopPropagation()
+                    menuTriggerRef.current = event.currentTarget ?? null
                     setChatMenu({
                       commit,
+                      key,
                       x: Number.isFinite(event.clientX) ? event.clientX : 0,
                       y: Number.isFinite(event.clientY) ? event.clientY : 0,
                     })
@@ -2592,6 +2675,7 @@ window.__ModuleLoader__.load({
           h('style', null, STYLE),
           toolbar,
           chatMenuLayer,
+          chatNoticeBanner,
           confirmingFetch
             ? h(
                 'div',
@@ -2722,8 +2806,24 @@ window.__ModuleLoader__.load({
       register('git-multirepo: commit reference rule', () => {
         const uiConversation = typeof ctx.get === 'function' ? ctx.get('uiConversation', false) : ctx.uiConversation
         const userText = uiConversation?.userText
-        if (typeof userText?.register !== 'function') return undefined
-        return userText.register(COMMIT_REFERENCE_RULE)
+        if (typeof userText?.register === 'function') return userText.register(COMMIT_REFERENCE_RULE)
+        // 服务尚未提供时不能静默跳过：先给出可见日志，再等 uiConversation 就绪后补注册。
+        console.warn('[git-multirepo] uiConversation.userText is not available yet; waiting for the service before registering commit reference markers')
+        if (typeof ctx.inject !== 'function') {
+          console.error('[git-multirepo] cannot wait for uiConversation: ctx.inject is unavailable; commit reference markers will not render')
+          return undefined
+        }
+        ctx.inject(['uiConversation'], (injected) => {
+          injected.effect(() => {
+            const lateUserText = injected.get('uiConversation')?.userText
+            if (typeof lateUserText?.register !== 'function') {
+              console.error('[git-multirepo] uiConversation is available but userText.register is missing; commit reference markers will not render')
+              return undefined
+            }
+            return lateUserText.register(COMMIT_REFERENCE_RULE)
+          }, 'git-multirepo: commit reference rule (deferred)')
+        })
+        return undefined
       })
 
       register('git-multirepo: commit reference chip', () =>
