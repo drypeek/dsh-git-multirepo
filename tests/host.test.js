@@ -778,6 +778,16 @@ test('agent tools validate arguments and confine explicit roots to the session w
   )
   assert.ok(changesOther instanceof Error && /invalid-root/.test(changesOther.message))
 
+  // A repo path is scoped like root: it cannot point at another registered workspace.
+  await assert.rejects(commitTool.execute({ repo: other, hash }, exec), /invalid-repo/)
+  await assert.rejects(commitDiffTool.execute({ repo: other, hash, file: 'file.txt' }, exec), /invalid-repo/)
+  await assert.rejects(changeDiffTool.execute({ repo: other, scope: 'staged', file: 'file.txt' }, exec), /invalid-repo/)
+
+  // Git accepts abbreviated hashes down to four characters; the tool schema must too.
+  const shortHash = g(repo, ['rev-parse', '--short=4', 'HEAD'])
+  const shortCommit = await commitTool.execute({ repo, hash: shortHash }, exec)
+  assert.equal(shortCommit.hash, hash)
+
   // A repository nested inside the session workspace is still reachable by explicit root.
   mkdirSync(path.join(repo, 'packages'), { recursive: true })
   const nested = fixtureAt(path.join(repo, 'packages', 'nested'))

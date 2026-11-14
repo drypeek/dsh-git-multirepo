@@ -30,7 +30,7 @@ const DETAIL_BYTE_LIMIT = 512 * 1024
 const FILE_LIST_BYTE_LIMIT = 128 * 1024
 const FIELD_LIMIT = 4000
 const HASH = /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/
-const REQUEST_HASH = /^[0-9a-fA-F]{7,64}$/
+const REQUEST_HASH = /^[0-9a-fA-F]{4,64}$/
 const MAX_ENTRIES = 50000
 const REQUEST_TIMEOUT_MS = 120000
 /** 单次扫描最多发现的仓库数，避免超大工作区拖垮请求。 */
@@ -1889,6 +1889,26 @@ function toolRoot(value, exec, ctx) {
   return workspaceContaining(ctx, root) === sessionWorkspace ? root : null
 }
 
+/**
+ * 解析工具传入的仓库路径，并限制在会话 cwd 所属的已注册工作区内。
+ * 与 toolRoot 使用同一工作区边界，避免提交/差异工具绕过 root 限制读取其他工作区。
+ * @param {string} value 工具传入的 repo 路径。
+ * @param {any} exec 工具执行上下文。
+ * @param {any} ctx cordis 上下文。
+ * @returns {string | null} 仓库根；非法或越界时为 null。
+ */
+function toolRepo(value, exec, ctx) {
+  const repo = resolveWorkspaceRoot(value)
+  if (repo === null) return null
+  const sessionCwd = exec?.agent?.session?.header?.cwd
+  if (typeof sessionCwd !== 'string' || sessionCwd === '') return null
+  const sessionRoot = resolveWorkspaceRoot(sessionCwd)
+  if (sessionRoot === null) return null
+  const sessionWorkspace = workspaceContaining(ctx, sessionRoot)
+  if (sessionWorkspace === null) return repo === sessionRoot ? repo : null
+  return workspaceContaining(ctx, repo) === sessionWorkspace ? repo : null
+}
+
 /** 仓库摘要，去掉体积大且与决策无关的字段。 */
 function compactRepo(repo) {
   return {
@@ -2084,7 +2104,7 @@ function agentToolDefinitions(ctx) {
       output: TOOL_OUTPUT,
       timeoutMs: 60000,
       async execute(args, exec) {
-        const repo = resolveWorkspaceRoot(toolString(args, 'repo'))
+        const repo = toolRepo(toolString(args, 'repo'), exec, ctx)
         if (repo === null) throw new Error('invalid-repo')
         const hash = toolString(args, 'hash')
         if (!REQUEST_HASH.test(hash)) throw new Error('invalid-hash')
@@ -2120,7 +2140,7 @@ function agentToolDefinitions(ctx) {
       output: TOOL_OUTPUT,
       timeoutMs: 60000,
       async execute(args, exec) {
-        const repo = resolveWorkspaceRoot(toolString(args, 'repo'))
+        const repo = toolRepo(toolString(args, 'repo'), exec, ctx)
         if (repo === null) throw new Error('invalid-repo')
         const hash = toolString(args, 'hash')
         if (!REQUEST_HASH.test(hash)) throw new Error('invalid-hash')
@@ -2145,7 +2165,7 @@ function agentToolDefinitions(ctx) {
       output: TOOL_OUTPUT,
       timeoutMs: 60000,
       async execute(args, exec) {
-        const repo = resolveWorkspaceRoot(toolString(args, 'repo'))
+        const repo = toolRepo(toolString(args, 'repo'), exec, ctx)
         if (repo === null) throw new Error('invalid-repo')
         const scope = toolString(args, 'scope')
         if (!WORKTREE_SCOPES.has(scope)) throw new Error('invalid-scope')
