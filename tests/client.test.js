@@ -713,6 +713,13 @@ test('fetch timeouts are reported as timeouts, never as success', async () => {
   assert.doesNotMatch(banner.props.className, /gm-fetch-toast-ok/, 'timeout must not be styled as success')
   assert.ok(textContent(banner).includes('fetch.timeoutTitle'), 'timeout banner needs the timeout title')
   assert.ok(textContent(banner).includes('fetch.timedOut'), 'timeout banner needs the timeout explanation')
+
+  start()
+  await renderer.flush()
+  assert.ok(
+    findOne(renderer.tree, (node) => node.props?.role === 'dialog'),
+    'a timed out fetch must not skip the next confirmation',
+  )
   renderer.unmount()
 })
 
@@ -764,6 +771,8 @@ test('timeout and failure banners expose per-repository details and skipped root
   deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'DETAILS', 'c'.repeat(40)))
   await renderer.flush()
   start()
+  await renderer.flush()
+  findOne(renderer.tree, (node) => node.type === 'button' && textContent(node) === 'fetch.confirmYes').props.onClick()
   await renderer.flush()
   deferredRequest(requests, 'fetch', renderer.cwd).resolve({
     failed: 0,

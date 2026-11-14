@@ -1892,8 +1892,9 @@ window.__ModuleLoader__.load({
               if (controller.signal.aborted || workspaceKeyRef.current !== requestWorkspace) return
               const report = summarizeFetchReport(payload)
               setFetchReport(report)
-              // 只有用户确认过、且至少真正拉取了一个仓库，才记住这个工作区。
-              if (options.remember === true && report.count > 0) {
+              // 只有用户确认过、且真正成功拉取了至少一个仓库，才记住这个工作区。
+              // 部分失败、超时、全部跳过都不算成功，下次仍要询问。
+              if (options.remember === true && report.status === 'ok' && report.okCount > 0) {
                 fetchConfirmedRoots.set(requestWorkspace, Date.now())
               }
               setExpandedKey(null)
