@@ -3,7 +3,7 @@ window.__ModuleLoader__.load({
   factory(require) {
     const React = require('react')
     const h = React.createElement
-    const { useCallback, useEffect, useMemo, useRef, useState } = React
+    const { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } = React
 
     /** 视图标识，即 conversation.view 的注册 id。 */
     const VIEW_ID = 'git-multirepo'
@@ -459,6 +459,10 @@ window.__ModuleLoader__.load({
 .gm-author{flex:none;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .gm-time{flex:none;margin-left:auto;padding-left:8px;color:var(--dsw-alias-label-primary);font-size:12px;font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap}
 .gm-hash{flex:none;font-family:var(--dsh-code-font-family,ui-monospace,SFMono-Regular,Consolas,monospace);opacity:.85}
+.gm-row-pending{background:color-mix(in srgb,var(--dsw-alias-brand-primary) 6%,transparent)}
+.gm-row-busy{flex:none;align-self:center;width:10px;height:10px;border:1.5px solid var(--dsw-alias-label-secondary);border-top-color:transparent;border-radius:50%;animation:gm-spin .8s linear infinite}
+@keyframes gm-spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion: reduce){.gm-row-busy{animation:none}}
 .gm-merge{flex:none;font-size:10px;line-height:1.5;padding:0 5px;border-radius:3px;background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l1);color:var(--dsw-alias-label-secondary)}
 .gm-badge{flex:none;font-size:10px;line-height:1.5;padding:0 5px;border-radius:3px;border:.5px solid var(--dsw-alias-border-l1);color:var(--dsw-alias-label-secondary);white-space:nowrap}
 .gm-badge-head{color:var(--dsw-alias-brand-primary);border-color:color-mix(in srgb,var(--dsw-alias-brand-primary) 45%,transparent)}
@@ -472,7 +476,7 @@ window.__ModuleLoader__.load({
 .gm-merge-hash{flex:none;font-family:var(--dsh-code-font-family,ui-monospace,SFMono-Regular,Consolas,monospace);color:var(--dsw-alias-label-secondary);opacity:.85}
 .gm-range{flex:none;font:inherit;font-size:12px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-sm,4px);padding:4px 6px;outline:none;cursor:pointer}
 .gm-detail{margin:0 20px 10px 33px;padding:10px 14px;border:.5px solid var(--dsw-alias-border-l1);border-radius:6px;background:var(--dsw-alias-bg-layer-1);font-size:12px;line-height:1.6}
-.gm-detail-loading{color:var(--dsw-alias-label-secondary)}
+.gm-detail-loading{color:var(--dsw-alias-label-secondary);min-height:56px;display:flex;align-items:center;justify-content:center}
 .gm-detail-error{color:var(--dsw-alias-state-error-primary)}
 .gm-detail-grid{display:grid;grid-template-columns:64px minmax(0,1fr);gap:3px 12px;align-items:baseline}
 .gm-detail-key{color:var(--dsw-alias-label-secondary);font-size:11px}
@@ -808,6 +812,16 @@ window.__ModuleLoader__.load({
         ? commit.short
         : String(commit.hash ?? '').slice(0, 8)
       return `[commit:${encodeURIComponent(commit.repo)}@${short}]\n`
+    }
+
+    /** 记录提交行在视口中的位置，供展开后的滚动补偿使用。 */
+    function expandAnchorOf(element) {
+      if (element === null || element === undefined || typeof element.getBoundingClientRect !== 'function') return null
+      try {
+        return { element, top: element.getBoundingClientRect().top }
+      } catch {
+        return null
+      }
     }
 
     /** 提交引用标记的正则；仓库名允许 URL 编码后出现 `]`、空格或 `@`。 */
@@ -1410,6 +1424,8 @@ window.__ModuleLoader__.load({
         const [collapsedRemote, setCollapsedRemote] = useState(true)
         const [collapsedLocal, setCollapsedLocal] = useState(false)
         const [expandedKey, setExpandedKey] = useState(null)
+        // 详情尚未缓存时先在行内显示加载状态，数据就绪后再展开，避免面板先出现占位再撑开造成跳动。
+        const [pendingExpandKey, setPendingExpandKey] = useState(null)
         const [details, setDetails] = useState({})
         const [fetching, setFetching] = useState(false)
         const [fetchReport, setFetchReport] = useState(null)
@@ -1428,6 +1444,11 @@ window.__ModuleLoader__.load({
         const fetchAbortRef = useRef(null)
         const changesAbortRef = useRef(null)
         const detailAbortsRef = useRef(new Map())
+        // 等待展开详情的提交键与触发它的提交行；数据就绪后一次展开。
+        const pendingExpandRef = useRef(null)
+        const pendingExpandElementRef = useRef(null)
+        // 展开后的滚动锚点：记录提交行在视口中的位置，展开导致布局移动时补偿 scrollTop。
+        const expandAnchorRef = useRef(null)
         const rootRef = useRef(null)
         const fetchDialogRef = useRef(null)
         const fetchButtonElRef = useRef(null)
@@ -1610,6 +1631,9 @@ window.__ModuleLoader__.load({
           setFetching(false)
           setHiddenRepos([])
           setExpandedKey(null)
+          pendingExpandRef.current = null
+          pendingExpandElementRef.current = null
+          setPendingExpandKey(null)
           setDetails({})
           setFetchReport(null)
           setFetchDetailsOpen(false)
@@ -1641,6 +1665,20 @@ window.__ModuleLoader__.load({
           menuTriggerRef.current = null
           if (trigger !== null && typeof trigger.focus === 'function') trigger.focus()
         }, [chatMenu])
+
+        // 切换展开项会改变列表高度；把点击的提交行保持在原来的视口位置，避免看起来像收起又展开。
+        useLayoutEffect(() => {
+          const anchor = expandAnchorRef.current
+          expandAnchorRef.current = null
+          if (anchor === null) return
+          const list = listRef.current
+          const element = anchor.element
+          if (list === null || element === null || element === undefined) return
+          if (element.isConnected === false) return
+          if (typeof element.getBoundingClientRect !== 'function') return
+          const delta = element.getBoundingClientRect().top - anchor.top
+          if (Math.abs(delta) > 1 && typeof list.scrollTop === 'number') list.scrollTop += delta
+        }, [expandedKey])
 
         // 右键菜单在页面滚动或按 Esc 时关闭；测试环境的 DOM 桩下跳过绑定。
         useEffect(() => {
@@ -1983,6 +2021,13 @@ window.__ModuleLoader__.load({
                 setDetails((current) =>
                   rememberRecord(current, key, { status: 'ready', data: payload }, DETAIL_CACHE_LIMIT),
                 )
+                if (pendingExpandRef.current === key) {
+                  pendingExpandRef.current = null
+                  setPendingExpandKey(null)
+                  expandAnchorRef.current = expandAnchorOf(pendingExpandElementRef.current)
+                  pendingExpandElementRef.current = null
+                  setExpandedKey(key)
+                }
               })
               .catch((error) => {
                 if (controller.signal.aborted || workspaceKeyRef.current !== cwd) return
@@ -1994,6 +2039,13 @@ window.__ModuleLoader__.load({
                     DETAIL_CACHE_LIMIT,
                   ),
                 )
+                if (pendingExpandRef.current === key) {
+                  pendingExpandRef.current = null
+                  setPendingExpandKey(null)
+                  expandAnchorRef.current = expandAnchorOf(pendingExpandElementRef.current)
+                  pendingExpandElementRef.current = null
+                  setExpandedKey(key)
+                }
               })
               .finally(() => {
                 if (detailAbortsRef.current.get(key) === controller) detailAbortsRef.current.delete(key)
@@ -2003,12 +2055,39 @@ window.__ModuleLoader__.load({
         )
 
         const toggleCommit = useCallback(
-          (commit) => {
+          (commit, element = null) => {
             const key = getDetailKey(commit)
-            setExpandedKey((current) => (current === key ? null : key))
+            if (expandedKey === key) {
+              pendingExpandRef.current = null
+              pendingExpandElementRef.current = null
+              setPendingExpandKey(null)
+              setExpandedKey(null)
+              return
+            }
+            if (pendingExpandKey === key) {
+              // 再次点击正在加载的提交行：取消这次的等待，不展开。
+              pendingExpandRef.current = null
+              pendingExpandElementRef.current = null
+              setPendingExpandKey(null)
+              detailAbortsRef.current.get(key)?.abort()
+              return
+            }
+            const entry = details[key]
+            if (entry?.status === 'ready' || entry?.status === 'error' || detailCache.has(key)) {
+              pendingExpandRef.current = null
+              pendingExpandElementRef.current = null
+              setPendingExpandKey(null)
+              expandAnchorRef.current = expandAnchorOf(element)
+              setExpandedKey(key)
+              return
+            }
+            // 数据未就绪：先在行内转圈，等详情返回后一次性展开，避免空白面板先撑开再跳动。
+            pendingExpandRef.current = key
+            pendingExpandElementRef.current = element
+            setPendingExpandKey(key)
             loadDetail(key, commit)
           },
-          [getDetailKey, loadDetail],
+          [details, expandedKey, pendingExpandKey, getDetailKey, loadDetail],
         )
 
         const runFetch = useCallback((options = {}) => {
@@ -2037,6 +2116,9 @@ window.__ModuleLoader__.load({
                 fetchConfirmedRoots.set(requestWorkspace, Date.now())
               }
               setExpandedKey(null)
+              pendingExpandRef.current = null
+              pendingExpandElementRef.current = null
+              setPendingExpandKey(null)
               setDetails({})
               setReloadToken((value) => value + 1)
             })
@@ -2856,11 +2938,12 @@ window.__ModuleLoader__.load({
         const pushRow = (commit) => {
           const key = getDetailKey(commit)
           const expanded = expandedKey === key
+          const pending = pendingExpandKey === key
           const menuOpen = chatMenu !== null && chatMenu.key === key
           const color = colors.get(commit.repo) ?? PALETTE[0]
           const source = branchLabel(commit, repoInfo.get(commit.repo), allBranches)
           const refs = extraRefs(commit.refs, source)
-          const activate = () => toggleCommit(commit)
+          const activate = (event) => toggleCommit(commit, event?.currentTarget ?? null)
           items.push(
             h(
               'div',
@@ -2868,12 +2951,18 @@ window.__ModuleLoader__.load({
               h(
                 'div',
                 {
-                  className: ['gm-row', expanded ? 'gm-row-open' : '', commit.remoteOnly === true ? 'gm-row-remote' : '']
+                  className: [
+                    'gm-row',
+                    expanded ? 'gm-row-open' : '',
+                    pending ? 'gm-row-pending' : '',
+                    commit.remoteOnly === true ? 'gm-row-remote' : '',
+                  ]
                     .filter(Boolean)
                     .join(' '),
                   role: 'button',
                   tabIndex: 0,
                   'aria-expanded': menuOpen ? true : expanded,
+                  'aria-busy': pending ? 'true' : undefined,
                   'aria-haspopup': 'menu',
                   'aria-controls': menuOpen ? COMMIT_MENU_ID : undefined,
                   title: `${commit.remoteOnly === true ? t('badge.remoteHint') : t('detail.expand')} · ${t('chat.menuHint')}`,
@@ -2881,7 +2970,7 @@ window.__ModuleLoader__.load({
                   onKeyDown: (event) => {
                     if (event.key === 'Enter' || event.key === ' ') {
                       event.preventDefault()
-                      activate()
+                      activate(event)
                       return
                     }
                     if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
@@ -2948,6 +3037,14 @@ window.__ModuleLoader__.load({
                     refs === '' ? null : h('span', { className: 'gm-refs', title: commit.refs }, refs),
                     h('span', { className: 'gm-author', title: commit.author }, commit.author),
                     h('span', { className: 'gm-hash', title: commit.hash }, commit.short),
+                    pending
+                      ? h('span', {
+                          className: 'gm-row-busy',
+                          key: 'busy',
+                          title: t('detail.loading'),
+                          'aria-label': t('detail.loading'),
+                        })
+                      : null,
                   ),
                 ),
               ),

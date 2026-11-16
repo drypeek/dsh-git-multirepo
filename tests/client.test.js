@@ -56,6 +56,10 @@ class HookRenderer {
     return this.useMemo(() => callback, deps)
   }
 
+  useLayoutEffect(effect, deps) {
+    this.useEffect(effect, deps)
+  }
+
   useEffect(effect, deps) {
     const index = this.hookIndex++
     const previous = this.hooks[index]
@@ -137,6 +141,9 @@ function fakeReact(options = {}) {
     },
     useEffect(effect, deps) {
       return HookRenderer.current.useEffect(effect, deps)
+    },
+    useLayoutEffect(effect, deps) {
+      return HookRenderer.current.useLayoutEffect(effect, deps)
     },
   }
   return React
@@ -1697,4 +1704,38 @@ test('commit reference markers are matched and rendered as inline chips', () => 
   assert.ok(content.includes('dsh-git-multirepo'))
   assert.ok(content.includes('abcdef1'))
   assert.equal(tree.props.title, raw)
+})
+
+test('commit detail expands only after its data is ready', async () => {
+  const requests = []
+  const client = loadClient(requestFetch(requests))
+  const renderer = new HookRenderer(client.view, null)
+  renderer.cwd = 'C:/expand-workspace'
+  renderer.props = viewProps(renderer)
+  renderer.render()
+  const hash = 'd'.repeat(40)
+  deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'EXPAND', hash))
+  await renderer.flush()
+
+  const row = findOne(renderer.tree, (node) => node.props?.['data-gm-head'] === 'true')
+  assert.ok(row, 'HEAD row should exist')
+  row.props.onClick()
+  await renderer.flush()
+
+  assert.doesNotMatch(textContent(renderer.tree), /detail\.loading/, 'no placeholder panel before data arrives')
+  const pendingRow = findOne(renderer.tree, (node) => node.props?.['data-gm-head'] === 'true')
+  assert.equal(pendingRow.props['aria-busy'], 'true')
+  assert.ok(findOne(renderer.tree, (node) => node.props?.className === 'gm-row-busy'), 'row shows inline loading')
+
+  deferredRequest(requests, 'commit', 'C:/expand-workspace/repo').resolve(detailValue(hash, 'READY DETAIL'))
+  await renderer.flush()
+  assert.match(textContent(renderer.tree), /READY DETAIL/)
+  assert.equal(findOne(renderer.tree, (node) => node.props?.className === 'gm-row-busy'), undefined)
+  const expandedRow = findOne(renderer.tree, (node) => node.props?.['data-gm-head'] === 'true')
+  assert.equal(expandedRow.props['aria-expanded'], true)
+
+  expandedRow.props.onClick()
+  await renderer.flush()
+  assert.doesNotMatch(textContent(renderer.tree), /READY DETAIL/, 'second click collapses the detail')
+  renderer.unmount()
 })
