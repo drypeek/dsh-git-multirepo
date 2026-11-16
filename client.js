@@ -3,7 +3,7 @@ window.__ModuleLoader__.load({
   factory(require) {
     const React = require('react')
     const h = React.createElement
-    const { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } = React
+    const { useCallback, useEffect, useMemo, useRef, useState } = React
 
     /** 视图标识，即 conversation.view 的注册 id。 */
     const VIEW_ID = 'git-multirepo'
@@ -814,16 +814,6 @@ window.__ModuleLoader__.load({
       return `[commit:${encodeURIComponent(commit.repo)}@${short}]\n`
     }
 
-    /** 记录提交行在视口中的位置，供展开后的滚动补偿使用。 */
-    function expandAnchorOf(element) {
-      if (element === null || element === undefined || typeof element.getBoundingClientRect !== 'function') return null
-      try {
-        return { element, top: element.getBoundingClientRect().top }
-      } catch {
-        return null
-      }
-    }
-
     /** 提交引用标记的正则；仓库名允许 URL 编码后出现 `]`、空格或 `@`。 */
     const COMMIT_REFERENCE_PATTERN = /\[commit:([^\]\s]+?)@([0-9a-fA-F]{4,64})\]/g
 
@@ -1444,11 +1434,8 @@ window.__ModuleLoader__.load({
         const fetchAbortRef = useRef(null)
         const changesAbortRef = useRef(null)
         const detailAbortsRef = useRef(new Map())
-        // 等待展开详情的提交键与触发它的提交行；数据就绪后一次展开。
+        // 等待展开详情的提交键；数据就绪后在原行下方一次性展开，不做滚动重定位。
         const pendingExpandRef = useRef(null)
-        const pendingExpandElementRef = useRef(null)
-        // 展开后的滚动锚点：记录提交行在视口中的位置，展开导致布局移动时补偿 scrollTop。
-        const expandAnchorRef = useRef(null)
         const rootRef = useRef(null)
         const fetchDialogRef = useRef(null)
         const fetchButtonElRef = useRef(null)
@@ -1632,7 +1619,6 @@ window.__ModuleLoader__.load({
           setHiddenRepos([])
           setExpandedKey(null)
           pendingExpandRef.current = null
-          pendingExpandElementRef.current = null
           setPendingExpandKey(null)
           setDetails({})
           setFetchReport(null)
@@ -1665,20 +1651,6 @@ window.__ModuleLoader__.load({
           menuTriggerRef.current = null
           if (trigger !== null && typeof trigger.focus === 'function') trigger.focus()
         }, [chatMenu])
-
-        // 切换展开项会改变列表高度；把点击的提交行保持在原来的视口位置，避免看起来像收起又展开。
-        useLayoutEffect(() => {
-          const anchor = expandAnchorRef.current
-          expandAnchorRef.current = null
-          if (anchor === null) return
-          const list = listRef.current
-          const element = anchor.element
-          if (list === null || element === null || element === undefined) return
-          if (element.isConnected === false) return
-          if (typeof element.getBoundingClientRect !== 'function') return
-          const delta = element.getBoundingClientRect().top - anchor.top
-          if (Math.abs(delta) > 1 && typeof list.scrollTop === 'number') list.scrollTop += delta
-        }, [expandedKey])
 
         // 右键菜单在页面滚动或按 Esc 时关闭；测试环境的 DOM 桩下跳过绑定。
         useEffect(() => {
@@ -2024,8 +1996,6 @@ window.__ModuleLoader__.load({
                 if (pendingExpandRef.current === key) {
                   pendingExpandRef.current = null
                   setPendingExpandKey(null)
-                  expandAnchorRef.current = expandAnchorOf(pendingExpandElementRef.current)
-                  pendingExpandElementRef.current = null
                   setExpandedKey(key)
                 }
               })
@@ -2042,8 +2012,6 @@ window.__ModuleLoader__.load({
                 if (pendingExpandRef.current === key) {
                   pendingExpandRef.current = null
                   setPendingExpandKey(null)
-                  expandAnchorRef.current = expandAnchorOf(pendingExpandElementRef.current)
-                  pendingExpandElementRef.current = null
                   setExpandedKey(key)
                 }
               })
@@ -2055,11 +2023,10 @@ window.__ModuleLoader__.load({
         )
 
         const toggleCommit = useCallback(
-          (commit, element = null) => {
+          (commit) => {
             const key = getDetailKey(commit)
             if (expandedKey === key) {
               pendingExpandRef.current = null
-              pendingExpandElementRef.current = null
               setPendingExpandKey(null)
               setExpandedKey(null)
               return
@@ -2067,7 +2034,6 @@ window.__ModuleLoader__.load({
             if (pendingExpandKey === key) {
               // 再次点击正在加载的提交行：取消这次的等待，不展开。
               pendingExpandRef.current = null
-              pendingExpandElementRef.current = null
               setPendingExpandKey(null)
               detailAbortsRef.current.get(key)?.abort()
               return
@@ -2075,15 +2041,12 @@ window.__ModuleLoader__.load({
             const entry = details[key]
             if (entry?.status === 'ready' || entry?.status === 'error' || detailCache.has(key)) {
               pendingExpandRef.current = null
-              pendingExpandElementRef.current = null
               setPendingExpandKey(null)
-              expandAnchorRef.current = expandAnchorOf(element)
               setExpandedKey(key)
               return
             }
-            // 数据未就绪：先在行内转圈，等详情返回后一次性展开，避免空白面板先撑开再跳动。
+            // 数据未就绪：先在行内转圈，等详情返回后在原位置一次性向下展开。
             pendingExpandRef.current = key
-            pendingExpandElementRef.current = element
             setPendingExpandKey(key)
             loadDetail(key, commit)
           },
@@ -2117,7 +2080,6 @@ window.__ModuleLoader__.load({
               }
               setExpandedKey(null)
               pendingExpandRef.current = null
-              pendingExpandElementRef.current = null
               setPendingExpandKey(null)
               setDetails({})
               setReloadToken((value) => value + 1)
@@ -2943,7 +2905,7 @@ window.__ModuleLoader__.load({
           const color = colors.get(commit.repo) ?? PALETTE[0]
           const source = branchLabel(commit, repoInfo.get(commit.repo), allBranches)
           const refs = extraRefs(commit.refs, source)
-          const activate = (event) => toggleCommit(commit, event?.currentTarget ?? null)
+          const activate = () => toggleCommit(commit)
           items.push(
             h(
               'div',
@@ -2970,7 +2932,7 @@ window.__ModuleLoader__.load({
                   onKeyDown: (event) => {
                     if (event.key === 'Enter' || event.key === ' ') {
                       event.preventDefault()
-                      activate(event)
+                      activate()
                       return
                     }
                     if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {

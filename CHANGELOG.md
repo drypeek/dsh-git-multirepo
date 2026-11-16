@@ -11,7 +11,7 @@ All notable changes to this project are documented here. Versions follow [Semant
 
 ### Changed
 
-- Commit details now expand only after their data is ready. While an uncached detail is loading the row shows a small inline spinner (`aria-busy`) instead of mounting an empty panel, so clicking a commit no longer looks like the row collapses and reopens; the list also compensates its scroll position so the clicked row stays put when a previously expanded detail collapses.
+- Commit details now expand in place only after their data is ready. While an uncached detail is loading the row shows a small inline spinner (`aria-busy`) instead of mounting an empty panel, and expanding a detail never scrolls or repositions the list; if the opened content extends past the viewport it simply stays there rather than being nudged into view.
 
 ## 0.2.1 — 2026-11-16
 

@@ -56,10 +56,6 @@ class HookRenderer {
     return this.useMemo(() => callback, deps)
   }
 
-  useLayoutEffect(effect, deps) {
-    this.useEffect(effect, deps)
-  }
-
   useEffect(effect, deps) {
     const index = this.hookIndex++
     const previous = this.hooks[index]
@@ -141,9 +137,6 @@ function fakeReact(options = {}) {
     },
     useEffect(effect, deps) {
       return HookRenderer.current.useEffect(effect, deps)
-    },
-    useLayoutEffect(effect, deps) {
-      return HookRenderer.current.useLayoutEffect(effect, deps)
     },
   }
   return React
