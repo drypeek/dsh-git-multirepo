@@ -9,6 +9,10 @@ All notable changes to this project are documented here. Versions follow [Semant
 - **AI integration (read-only).** The Host registers five model-facing tools — `git_multirepo_state`, `git_multirepo_changes`, `git_multirepo_commit`, `git_multirepo_commit_diff` and `git_multirepo_change_diff` — plus a short system-prompt section, so the agent can inspect repository status, commits and diffs without raw git commands. The tools reuse the same workspace boundary, read-only processors and size limits as the UI; they never fetch, merge or modify files. Hosts without the `tools`/`systemPrompt` services keep working unchanged.
 - **Add to chat.** Right-click a commit row and choose「添加到对话」/ “Add to chat” to insert a compact marker (`[commit:<workspace-relative-repository-name>@<short-hash>]`, percent-encoded) into the chat input — no message is sent automatically. Add several commits, write your own question, and send them together; sent messages render each marker as an inline chip, and the agent resolves it with the read-only tools above (state → repository name/path, then commit or diff tools). The draft shows the raw marker until it is sent. The menu also opens with Shift+F10 or the context-menu key.
 
+### Changed
+
+- Commit details now expand only after their data is ready. While an uncached detail is loading the row shows a small inline spinner (`aria-busy`) instead of mounting an empty panel, so clicking a commit no longer looks like the row collapses and reopens; the list also compensates its scroll position so the clicked row stays put when a previously expanded detail collapses.
+
 ## 0.2.1 — 2026-11-16
 
 ### Changed
