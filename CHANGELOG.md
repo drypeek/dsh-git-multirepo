@@ -2,11 +2,22 @@
 
 All notable changes to this project are documented here. Versions follow [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- **AI integration (read-only).** The Host registers five model-facing tools — `git_multirepo_state`, `git_multirepo_changes`, `git_multirepo_commit`, `git_multirepo_commit_diff` and `git_multirepo_change_diff` — plus a short system-prompt section, so the agent can inspect repository status, commits and diffs without raw git commands. The tools reuse the same workspace boundary, read-only processors and size limits as the UI; they never fetch, merge or modify files. Hosts without the `tools`/`systemPrompt` services keep working unchanged.
+- **Add to chat.** Right-click a commit row and choose「添加到对话」/ “Add to chat” to insert a compact marker (`[commit:<workspace-relative-repository-name>@<short-hash>]`, percent-encoded) into the chat input — no message is sent automatically. Add several commits, write your own question, and send them together; sent messages render each marker as an inline chip, and the agent resolves it with the read-only tools above (state → repository name/path, then commit or diff tools). The draft shows the raw marker until it is sent. The menu also opens with Shift+F10 or the context-menu key.
+
+### Changed
+
+- Commit details now expand in place only after their data is ready. While an uncached detail is loading the row shows a small inline spinner (`aria-busy`) instead of mounting an empty panel, and expanding a detail never scrolls or repositions the list; if the opened content extends past the viewport it simply stays there rather than being nudged into view.
+
 ## 0.2.1 — 2026-11-16
 
 ### Changed
 
-- Fetch feedback is now explicit. Clicking **Fetch** opens an accessible confirmation dialog (title, repository count, read-only explanation, explicit start/cancel, `Esc` to close, focus is trapped inside and restored afterwards, and the page behind is inert while it is open). The confirmation is remembered per workspace for 10 minutes in the current page session only; it is recorded after a successful non-empty fetch, so a failed or empty fetch asks again, and a page reload asks again. Results appear in a prominent dismissible banner with four states — success, partial failure, timeout and error — and per-repository details for failures and skipped non-repository directories, plus a note when a timeout leaves the remaining repositories unattempted. Successful results auto-dismiss after 3 seconds; failure states stay until dismissed or the next fetch. The banner and dialog stay visible across the commit-history and working-tree-changes views.
+- Fetch feedback is now explicit. Clicking **Fetch** opens an accessible confirmation dialog (title, repository count, read-only explanation, explicit start/cancel, `Esc` to close, focus is trapped inside and restored afterwards, and the page behind is inert while it is open). The confirmation is remembered per workspace for 10 minutes in the current page session only; it is recorded after a successful non-empty fetch, so a failed fetch asks again, and a page reload asks again. Results appear in a prominent dismissible banner with four states — success, partial failure, timeout and error — and per-repository details for failures and skipped non-repository directories, plus a note when a timeout leaves the remaining repositories unattempted. Successful results auto-dismiss after 3 seconds; failure states stay until dismissed or the next fetch. The banner and dialog stay visible across the commit-history and working-tree-changes views.
 
 ## 0.2.0 — 2026-11-11
 

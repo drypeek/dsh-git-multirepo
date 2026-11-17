@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, unlink
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import vm from 'node:vm'
-import { apply } from '../index.js'
+import { apply, createToolBudget, renderToolResult } from '../index.js'
 
 const root = mkdtempSync(path.join(process.env.DSH_TEST_TMPDIR ?? tmpdir(), 'multirepo-tests-'))
 // Isolate the test process from the developer's URL rewrites, SSH commands and
@@ -48,6 +48,43 @@ function host(roots) {
     const response = await routes.get(`/api/git-multirepo/${name}`)(new Request(`http://localhost/api/git-multirepo/${name}?${new URLSearchParams(params)}`, options))
     return { status: response.status, data: await response.json() }
   }
+}
+
+/** 带 Agent 服务（tools / systemPrompt / agents）的 Host 桩，用于验证 AI 集成。 */
+function hostWithAgent(roots, options = {}) {
+  const routes = new Map()
+  const tools = new Map()
+  const sections = []
+  const context = {
+    effect: (start) => start(),
+    inject: (_deps, callback) => callback({
+      get: (name) => context[name],
+      effect: (start) => start(),
+    }),
+    workspaceRegistry: { list: () => roots.map((p) => ({ path: p })) },
+    connection: { fetch: { register: (route) => { routes.set(route.path, route.fetch); return () => {} } } },
+    tools: {
+      register: (tool) => {
+        tools.set(tool.name, tool)
+        return () => tools.delete(tool.name)
+      },
+    },
+    systemPrompt: {
+      getSectionOrder: (name) => (name === 'TOOLS_SDK' ? 5000 : 0),
+      section: (value) => {
+        sections.push(value)
+        return () => {}
+      },
+    },
+    agents: options.agents ?? { get: () => undefined },
+  }
+  context.get = (name) => context[name]
+  apply(context)
+  const call = async (name, params, requestOptions = {}) => {
+    const response = await routes.get(`/api/git-multirepo/${name}`)(new Request(`http://localhost/api/git-multirepo/${name}?${new URLSearchParams(params)}`, requestOptions))
+    return { status: response.status, data: await response.json() }
+  }
+  return { call, tools, sections }
 }
 const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`
 function trap(repo) {
@@ -650,6 +687,160 @@ test('worktree handles spaces, unicode and bracket filenames with literal pathsp
     assert.equal(diff.data.additions, 1, name)
     assert.deepEqual(diff.data.hunks[0].lines, [{ type: 'add', text: 'x' }])
   }
+})
+
+test('agent tools expose read-only state, changes, commits and diffs', async () => {
+  const repo = fixture()
+  const host = hostWithAgent([repo])
+  assert.deepEqual([...host.tools.keys()].sort(), [
+    'git_multirepo_change_diff',
+    'git_multirepo_changes',
+    'git_multirepo_commit',
+    'git_multirepo_commit_diff',
+    'git_multirepo_state',
+  ])
+  assert.equal(host.sections.length, 1)
+  const section = host.sections[0]
+  assert.equal(section.name, 'git-multirepo/usage')
+  assert.equal(section.order, 5000, 'prompt section must use the host-allocated tool order')
+  assert.match(section.text(), /read-only/i)
+  assert.match(section.text(), /\[commit:/)
+  assert.match(section.text(), /percent-decod/i)
+  for (const [name, definition] of host.tools) {
+    assert.equal(typeof definition.execute, 'function', name)
+    assert.equal(typeof definition.output.render, 'function', name)
+    assert.ok(Number.isFinite(definition.timeoutMs) && definition.timeoutMs > 0 && definition.timeoutMs <= 120000, name)
+  }
+
+  const exec = { signal: new AbortController().signal, agent: { session: { header: { cwd: repo } } } }
+  const headBefore = g(repo, ['rev-parse', 'HEAD'])
+  const statusBefore = g(repo, ['status', '--porcelain'])
+  const refsBefore = g(repo, ['for-each-ref'])
+
+  const state = await host.tools.get('git_multirepo_state').execute({}, exec)
+  assert.equal(state.repos.length, 1)
+  assert.equal(state.repos[0].path, realpathSync.native(repo))
+  assert.notEqual(state.repos[0].branch, '')
+  assert.equal(state.repos[0].dirty, false)
+  const commit = state.commits[0]
+  assert.ok(commit?.hash)
+
+  const changes = await host.tools.get('git_multirepo_changes').execute({}, exec)
+  assert.equal(changes.repos.length, 0, 'clean fixture has no working-tree changes')
+
+  const detail = await host.tools.get('git_multirepo_commit').execute({ repo, hash: commit.hash }, exec)
+  assert.equal(detail.hash, commit.hash)
+  assert.ok(detail.files.length >= 1)
+
+  const diff = await host.tools.get('git_multirepo_commit_diff').execute({ repo, hash: commit.hash, file: 'file.txt' }, exec)
+  assert.equal(diff.file, 'file.txt')
+  assert.ok(diff.additions >= 1)
+
+  const headAfter = g(repo, ['rev-parse', 'HEAD'])
+  const statusAfter = g(repo, ['status', '--porcelain'])
+  const refsAfter = g(repo, ['for-each-ref'])
+  assert.equal(headAfter, headBefore, 'read-only tools must not move HEAD')
+  assert.equal(statusAfter, statusBefore, 'read-only tools must not modify the working tree')
+  assert.equal(refsAfter, refsBefore, 'read-only tools must not create refs')
+
+  await assert.rejects(
+    host.tools.get('git_multirepo_commit').execute({ repo: path.dirname(repo), hash: commit.hash }, exec),
+    /invalid-repo|outside-workspace/,
+  )
+})
+
+test('agent tools validate arguments and confine explicit roots to the session workspace', async () => {
+  const repo = fixture()
+  const other = fixture()
+  const host = hostWithAgent([repo, other])
+  const exec = { signal: new AbortController().signal, agent: { session: { header: { cwd: repo } } } }
+  const hash = g(repo, ['rev-parse', 'HEAD'])
+  const stateTool = host.tools.get('git_multirepo_state')
+  const commitTool = host.tools.get('git_multirepo_commit')
+  const commitDiffTool = host.tools.get('git_multirepo_commit_diff')
+  const changeDiffTool = host.tools.get('git_multirepo_change_diff')
+
+  await assert.rejects(stateTool.execute({ root: 42 }, exec), /invalid-root/)
+  await assert.rejects(stateTool.execute({ limit: 'many' }, exec), /invalid-limit/)
+  await assert.rejects(commitTool.execute({ repo: 42, hash }, exec), /invalid-repo/)
+  await assert.rejects(commitTool.execute({ repo, hash: 'not-a-hash' }, exec), /invalid-hash/)
+  await assert.rejects(commitTool.execute({ repo, hash: 123 }, exec), /invalid-hash/)
+  await assert.rejects(commitDiffTool.execute({ repo, hash, file: '../file.txt' }, exec), /invalid-file/)
+  await assert.rejects(commitDiffTool.execute({ repo, hash: 'zzz', file: 'file.txt' }, exec), /invalid-hash/)
+  await assert.rejects(changeDiffTool.execute({ repo, scope: 'bogus', file: 'file.txt' }, exec), /invalid-scope/)
+  await assert.rejects(changeDiffTool.execute({ repo, scope: 'unstaged', file: 7 }, exec), /invalid-file/)
+  // A path inside a different registered workspace must be refused even though the
+  // HTTP handler would accept it: the tool surface is scoped to the session workspace.
+  await assert.rejects(stateTool.execute({ root: other }, exec), /invalid-root/)
+  const changesOther = await host.tools.get('git_multirepo_changes').execute({ root: other }, exec).then(
+    () => null,
+    (error) => error,
+  )
+  assert.ok(changesOther instanceof Error && /invalid-root/.test(changesOther.message))
+
+  // A repo path is scoped like root: it cannot point at another registered workspace.
+  await assert.rejects(commitTool.execute({ repo: other, hash }, exec), /invalid-repo/)
+  await assert.rejects(commitDiffTool.execute({ repo: other, hash, file: 'file.txt' }, exec), /invalid-repo/)
+  await assert.rejects(changeDiffTool.execute({ repo: other, scope: 'staged', file: 'file.txt' }, exec), /invalid-repo/)
+
+  // Git accepts abbreviated hashes down to four characters; the tool schema must too.
+  const shortHash = g(repo, ['rev-parse', '--short=4', 'HEAD'])
+  const shortCommit = await commitTool.execute({ repo, hash: shortHash }, exec)
+  assert.equal(shortCommit.hash, hash)
+
+  // A repository nested inside the session workspace is still reachable by explicit root.
+  mkdirSync(path.join(repo, 'packages'), { recursive: true })
+  const nested = fixtureAt(path.join(repo, 'packages', 'nested'))
+  const nestedState = await stateTool.execute({ root: nested }, exec)
+  assert.equal(nestedState.repos.length, 1)
+  assert.equal(nestedState.repos[0].path, realpathSync.native(nested))
+})
+
+test('agent tool output stays valid JSON and reports structural truncation', () => {
+  const small = { repos: [{ name: 'repo', path: 'C:\\repo' }], truncated: false }
+  assert.deepEqual(JSON.parse(renderToolResult(small)), small)
+  assert.equal(renderToolResult(undefined), 'null', 'a missing result still renders valid JSON')
+
+  const big = {
+    commits: Array.from({ length: 300 }, (_, index) => ({
+      hash: String(index).padStart(8, 'a'),
+      subject: 'x'.repeat(500),
+      repo: 'repo',
+    })),
+  }
+  assert.ok(JSON.stringify(big).length > 20000)
+  const text = renderToolResult(big)
+  assert.ok(text.length <= 20000, 'truncated payload must fit the tool text limit')
+  const parsed = JSON.parse(text)
+  assert.equal(parsed.truncated, true)
+  assert.ok(parsed.originalChars > 20000)
+  assert.ok(Array.isArray(parsed.commits))
+  assert.ok(parsed.commits.length < 300)
+})
+
+test('tool budget enforces concurrency and timeout limits', async () => {
+  const limited = createToolBudget({ limit: 1, timeoutMs: 1000 })
+  let release = null
+  const first = limited(undefined, () => new Promise((resolve) => { release = resolve }))
+  await assert.rejects(limited(undefined, async () => 'never'), /busy/)
+  release('done')
+  assert.equal(await first, 'done')
+
+  const shortTimeout = createToolBudget({ limit: 1, timeoutMs: 20 })
+  await assert.rejects(
+    shortTimeout(undefined, (signal) => new Promise((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+    })),
+    (error) => error.code === 'request-timeout' && /request-timeout/.test(error.message),
+  )
+
+  const cancellable = createToolBudget({ limit: 1, timeoutMs: 1000 })
+  const controller = new AbortController()
+  const pending = cancellable(controller.signal, (signal) => new Promise((_resolve, reject) => {
+    signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+  }))
+  controller.abort()
+  await assert.rejects(pending, (error) => error.code === 'request-cancelled')
 })
 
 test('workspace roots using Windows 8.3 short paths resolve like Git long paths', async () => {

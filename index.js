@@ -30,7 +30,7 @@ const DETAIL_BYTE_LIMIT = 512 * 1024
 const FILE_LIST_BYTE_LIMIT = 128 * 1024
 const FIELD_LIMIT = 4000
 const HASH = /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/
-const REQUEST_HASH = /^[0-9a-fA-F]{7,64}$/
+const REQUEST_HASH = /^[0-9a-fA-F]{4,64}$/
 const MAX_ENTRIES = 50000
 const REQUEST_TIMEOUT_MS = 120000
 /** 单次扫描最多发现的仓库数，避免超大工作区拖垮请求。 */
@@ -126,6 +126,17 @@ const WORKTREE_CACHE_BYTE_LIMIT = 8 * 1024 * 1024
 const MAX_CHANGE_ENTRIES = 2000
 /** 未跟踪文件预览的最大读取字节数。 */
 const UNTRACKED_READ_LIMIT = 512 * 1024
+/** 工具结果渲染为模型文本时的字符上限。 */
+const TOOL_TEXT_LIMIT = 20000
+/** 工具调用与 HTTP 路由共享的并发预算：同时最多处理 4 次查询。 */
+const TOOL_CONCURRENCY = 4
+/** 工具调用的总时限，与 HTTP 路由的 REQUEST_TIMEOUT_MS 保持一致。 */
+const TOOL_REQUEST_TIMEOUT_MS = REQUEST_TIMEOUT_MS
+/** 模型可见的 git 工具使用说明，保持简短以免挤占上下文。 */
+const AGENT_GUIDANCE = [
+  'Git workspace tools: git_multirepo_state, git_multirepo_changes, git_multirepo_commit, git_multirepo_commit_diff and git_multirepo_change_diff are read-only viewers over the session workspace. Use them when the user asks about repository status, commits, diffs or uncommitted changes instead of raw git commands. They never fetch, merge or modify files.',
+  'Chat commit references: a user message may contain markers of the form [commit:<repo-name>@<short-hash>]. <repo-name> is the workspace-relative repository name shown in the UI, percent-encoded; percent-decode it (for example my%20repo becomes "my repo"). Call git_multirepo_state for the session workspace, find the repository whose `name` matches the decoded value, and pass its `path` as `repo` together with the short hash as `hash` to git_multirepo_commit. Use git_multirepo_commit_diff with a path from its `files` list for a commit diff, or git_multirepo_change_diff with scope staged/unstaged/untracked for an uncommitted change. Do not repeat the raw marker in your answer.',
+].join('\n\n')
 
 /** 工作区状态缓存，键为根目录加查询条件。 */
 const stateCache = new Map()
@@ -1694,6 +1705,520 @@ async function handleWorktreeDiff(request, ctx) {
   return jsonResponse(200, { scope, file, ...parseUnifiedDiff(result.stdout) })
 }
 
+/** 工具复用的内部只读处理器，键与路由一一对应。 */
+const INTERNAL_READ_ROUTES = {
+  [ROUTE_STATE]: handleState,
+  [ROUTE_COMMIT]: handleCommit,
+  [ROUTE_PATCH]: handlePatch,
+  [ROUTE_WORKTREE]: handleWorktree,
+  [ROUTE_WORKTREE_DIFF]: handleWorktreeDiff,
+}
+
+/**
+ * 构造内部查询请求，复用既有路由处理器。
+ * @param {string} route 路由。
+ * @param {Record<string, string>} params 查询参数。
+ * @param {AbortSignal} [signal] 取消信号。
+ */
+function internalRequest(route, params, signal) {
+  return new Request(`http://127.0.0.1${route}?${new URLSearchParams(params).toString()}`, { signal })
+}
+
+/**
+ * 复用只读处理器执行一次内部查询；非 2xx 响应转成工具错误。
+ * @param {string} route 只读路由。
+ * @param {Record<string, string>} params 查询参数。
+ * @param {any} ctx cordis 上下文。
+ * @param {AbortSignal} [signal] 取消信号。
+ */
+async function internalJson(route, params, ctx, signal) {
+  const handler = INTERNAL_READ_ROUTES[route]
+  const response = await handler(internalRequest(route, params, signal), ctx)
+  const value = await response.json()
+  if (!response.ok) {
+    const error = typeof value?.error === 'string' ? value.error : 'request-failed'
+    throw new Error(`${error}: ${route}`)
+  }
+  return value
+}
+
+/**
+ * 为工具调用创建并发 + 超时预算，语义与 runRequest 的 HTTP 预算一致：
+ * 超过并发上限立即失败（busy），超过时限中止并报 request-timeout。
+ * 独立成工厂以便测试用更小的预算验证边界。
+ * @param {{ limit?: number, timeoutMs?: number }} [options] 预算参数。
+ * @returns {(signal: AbortSignal | undefined, work: (signal: AbortSignal) => Promise<any>) => Promise<any>} 预算包装器。
+ */
+function createToolBudget({ limit = TOOL_CONCURRENCY, timeoutMs = TOOL_REQUEST_TIMEOUT_MS } = {}) {
+  let active = 0
+  return async function withToolBudget(signal, work) {
+    if (active >= limit) {
+      const error = new Error('busy: too many concurrent tool calls, retry in a moment')
+      error.code = 'busy'
+      throw error
+    }
+    active += 1
+    const control = new AbortController()
+    let timedOut = false
+    const abort = () => control.abort()
+    if (signal?.aborted) control.abort()
+    else signal?.addEventListener('abort', abort, { once: true })
+    const deadline = setTimeout(() => {
+      timedOut = true
+      control.abort()
+    }, timeoutMs)
+    try {
+      control.signal.throwIfAborted()
+      return await work(control.signal)
+    } catch (error) {
+      if (timedOut) {
+        const failure = new Error('request-timeout: tool call exceeded the time budget')
+        failure.code = 'request-timeout'
+        throw failure
+      }
+      if (control.signal.aborted) {
+        const failure = new Error('request-cancelled: tool call was cancelled')
+        failure.code = 'request-cancelled'
+        throw failure
+      }
+      throw error
+    } finally {
+      clearTimeout(deadline)
+      signal?.removeEventListener('abort', abort)
+      active -= 1
+    }
+  }
+}
+
+/** 工具查询共享的全局预算。 */
+const toolBudget = createToolBudget()
+
+/**
+ * 在共享预算内执行一次内部只读查询。
+ * @param {string} route 只读路由。
+ * @param {Record<string, string>} params 查询参数。
+ * @param {any} ctx cordis 上下文。
+ * @param {AbortSignal} [signal] 调用方取消信号。
+ */
+function toolJson(route, params, ctx, signal) {
+  return toolBudget(signal, (budgetSignal) => internalJson(route, params, ctx, budgetSignal))
+}
+
+/**
+ * 读取可选的数字参数；类型错误直接报参数错误，不再静默回退。
+ * @param {Record<string, unknown> | undefined} args 工具参数。
+ * @param {string} name 参数名。
+ * @param {number} fallback 缺省值。
+ * @param {number} min 最小值。
+ * @param {number} max 最大值。
+ */
+function toolNumber(args, name, fallback, min, max) {
+  const value = args?.[name]
+  if (value === undefined || value === null) return fallback
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error(`invalid-${name}: expected a finite number`)
+  }
+  return Math.min(Math.max(Math.floor(value), min), max)
+}
+
+/** 读取必填的非空字符串参数。 */
+function toolString(args, name) {
+  const value = args?.[name]
+  if (typeof value !== 'string' || value === '') {
+    throw new Error(`invalid-${name}: expected a non-empty string`)
+  }
+  return value
+}
+
+/** 读取可选字符串参数；显式传错类型时报错而不是静默忽略。 */
+function toolOptionalString(args, name) {
+  const value = args?.[name]
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'string') throw new Error(`invalid-${name}: expected a string`)
+  return value
+}
+
+/**
+ * 判断 target 是否位于某个已注册工作区内，返回该工作区的真实路径。
+ * @param {any} ctx cordis 上下文。
+ * @param {string} target 目标绝对路径。
+ */
+function workspaceContaining(ctx, target) {
+  let workspaces
+  try {
+    workspaces = ctx?.workspaceRegistry?.list?.()
+  } catch {
+    return null
+  }
+  if (!Array.isArray(workspaces)) return null
+  const resolved = canonicalPath(target)
+  if (resolved === null) return null
+  for (const workspace of workspaces) {
+    if (typeof workspace?.path !== 'string' || workspace.path === '') continue
+    const base = canonicalPath(workspace.path)
+    if (base === null) continue
+    const relative = path.relative(base, resolved)
+    if (relative === '') return base
+    if (relative === '..' || relative.startsWith(`..${path.sep}`)) continue
+    if (path.isAbsolute(relative)) continue
+    return base
+  }
+  return null
+}
+
+/**
+ * 解析工具的工作区根：默认使用会话 cwd；显式 root 必须位于会话 cwd 所属的
+ * 已注册工作区内，避免模型借用本插件读取另一个已注册工作区的仓库。
+ * @param {unknown} value 工具传入的 root。
+ * @param {any} exec 工具执行上下文。
+ * @param {any} ctx cordis 上下文。
+ * @returns {string | null} 工作区根；非法或越界时为 null。
+ */
+function toolRoot(value, exec, ctx) {
+  const sessionCwd = exec?.agent?.session?.header?.cwd
+  const explicit = typeof value === 'string' && value.trim() !== '' ? value : undefined
+  const candidate = explicit ?? (typeof sessionCwd === 'string' && sessionCwd !== '' ? sessionCwd : undefined)
+  if (candidate === undefined) return null
+  const root = resolveWorkspaceRoot(candidate)
+  if (root === null) return null
+  if (explicit === undefined) return root
+  const sessionRoot = typeof sessionCwd === 'string' && sessionCwd !== '' ? resolveWorkspaceRoot(sessionCwd) : null
+  if (sessionRoot === null) return null
+  const sessionWorkspace = workspaceContaining(ctx, sessionRoot)
+  if (sessionWorkspace === null) return root === sessionRoot ? root : null
+  return workspaceContaining(ctx, root) === sessionWorkspace ? root : null
+}
+
+/**
+ * 解析工具传入的仓库路径，并限制在会话 cwd 所属的已注册工作区内。
+ * 与 toolRoot 使用同一工作区边界，避免提交/差异工具绕过 root 限制读取其他工作区。
+ * @param {string} value 工具传入的 repo 路径。
+ * @param {any} exec 工具执行上下文。
+ * @param {any} ctx cordis 上下文。
+ * @returns {string | null} 仓库根；非法或越界时为 null。
+ */
+function toolRepo(value, exec, ctx) {
+  const repo = resolveWorkspaceRoot(value)
+  if (repo === null) return null
+  const sessionCwd = exec?.agent?.session?.header?.cwd
+  if (typeof sessionCwd !== 'string' || sessionCwd === '') return null
+  const sessionRoot = resolveWorkspaceRoot(sessionCwd)
+  if (sessionRoot === null) return null
+  const sessionWorkspace = workspaceContaining(ctx, sessionRoot)
+  if (sessionWorkspace === null) return repo === sessionRoot ? repo : null
+  return workspaceContaining(ctx, repo) === sessionWorkspace ? repo : null
+}
+
+/** 仓库摘要，去掉体积大且与决策无关的字段。 */
+function compactRepo(repo) {
+  return {
+    name: repo.name,
+    path: repo.path,
+    branch: repo.branch,
+    dirty: repo.dirty,
+    upstream: repo.upstream ?? null,
+    error: repo.error ?? null,
+  }
+}
+
+/** 提交摘要。 */
+function compactCommit(commit) {
+  return {
+    repo: commit.repo,
+    hash: commit.hash,
+    short: commit.short,
+    author: commit.author,
+    date: commit.date,
+    subject: commit.subject,
+    refs: commit.refs,
+  }
+}
+
+/** 工作区改动文件摘要。 */
+function compactChangeFile(file) {
+  const value = { path: file.path, status: file.status }
+  if (typeof file.insertions === 'number') value.insertions = file.insertions
+  if (typeof file.deletions === 'number') value.deletions = file.deletions
+  if (file.binary === true) value.binary = true
+  if (file.directory === true) value.directory = true
+  return value
+}
+
+/** 工作区改动仓库摘要。 */
+function compactChangeRepo(repo) {
+  return {
+    name: repo.name,
+    path: repo.path,
+    branch: repo.branch,
+    upstream: repo.upstream ?? null,
+    unborn: repo.unborn === true,
+    error: repo.error ?? null,
+    totals: repo.totals,
+    filesTruncated: repo.filesTruncated === true,
+    conflicted: repo.conflicted.map(compactChangeFile),
+    staged: repo.staged.map(compactChangeFile),
+    unstaged: repo.unstaged.map(compactChangeFile),
+    untracked: repo.untracked.map(compactChangeFile),
+  }
+}
+
+/**
+ * 递归裁剪数组条目和长字符串；只做 JSON 数据变换，结果始终可序列化。
+ * @param {unknown} value 原始值。
+ * @param {number} maxItems 每个数组保留的条目数。
+ * @param {number} maxString 每个字符串保留的字符数。
+ */
+function shrinkToolValue(value, maxItems, maxString) {
+  if (Array.isArray(value)) return value.slice(0, maxItems).map((item) => shrinkToolValue(item, maxItems, maxString))
+  if (value !== null && typeof value === 'object') {
+    const copy = {}
+    for (const [key, item] of Object.entries(value)) copy[key] = shrinkToolValue(item, maxItems, maxString)
+    return copy
+  }
+  if (typeof value === 'string' && value.length > maxString) return `${value.slice(0, maxString)}\n… (truncated)`
+  return value
+}
+
+/**
+ * 把工具结果渲染成模型可见文本：优先原样输出合法 JSON；超过字符上限时
+ * 结构化裁剪数组/长字符串并显式写入 truncated 与 originalChars，
+ * 绝不从字符串中间截断而产生非法 JSON。
+ * @param {unknown} value 工具返回值。
+ */
+function renderToolResult(value) {
+  const full = JSON.stringify(value ?? null, null, 2)
+  if (full.length <= TOOL_TEXT_LIMIT) return full
+  const candidates = [[200, 4000], [50, 800], [10, 300], [3, 120]]
+  for (const [maxItems, maxString] of candidates) {
+    let shrunk = shrinkToolValue(value, maxItems, maxString)
+    if (shrunk !== null && typeof shrunk === 'object' && !Array.isArray(shrunk)) {
+      shrunk.truncated = true
+      shrunk.originalChars = full.length
+    } else {
+      shrunk = { truncated: true, originalChars: full.length, items: shrunk }
+    }
+    const text = JSON.stringify(shrunk, null, 2)
+    if (text.length <= TOOL_TEXT_LIMIT) return text
+  }
+  return JSON.stringify(
+    {
+      truncated: true,
+      originalChars: full.length,
+      note: 'result omitted because it exceeded the tool output limit; narrow the query and retry',
+    },
+    null,
+    2,
+  )
+}
+
+/** 工具的统一 JSON 输出声明。 */
+const TOOL_OUTPUT = {
+  schema: { type: 'object', additionalProperties: true },
+  render: (_args, value) => [{ type: 'text', text: renderToolResult(value) }],
+}
+
+/**
+ * 构造只读 git 工具；工具直接复用 Host 的只读处理器，因此边界与 UI 完全一致。
+ * @param {any} ctx cordis 上下文。
+ */
+function agentToolDefinitions(ctx) {
+  const rootParameter = {
+    type: 'string',
+    description: 'Absolute workspace root inside the session workspace; defaults to the session working directory.',
+  }
+  return [
+    {
+      name: 'git_multirepo_state',
+      description: 'Read-only overview of the Git repositories in the session workspace: branch, working-tree dirty flag, upstream ahead/behind and recent commits. Prefer this over raw git commands when the user asks about repository status or history.',
+      parameters: {
+        type: 'object',
+        properties: {
+          root: rootParameter,
+          limit: { type: 'number', description: 'Commits per repository, 1-100 (default 20).' },
+        },
+      },
+      output: TOOL_OUTPUT,
+      timeoutMs: TOOL_REQUEST_TIMEOUT_MS,
+      async execute(args, exec) {
+        const root = toolRoot(toolOptionalString(args, 'root'), exec, ctx)
+        if (root === null) throw new Error('invalid-root: no workspace root in this session')
+        const value = await toolJson(ROUTE_STATE, {
+          root,
+          limit: String(toolNumber(args, 'limit', 20, 1, 100)),
+          all: '0',
+        }, ctx, exec.signal)
+        return {
+          root: value.root,
+          repos: value.repos.map(compactRepo),
+          commits: value.commits.slice(0, 200).map(compactCommit),
+          total: value.total,
+          truncated: value.truncated === true,
+          reposTruncated: value.reposTruncated === true,
+          reposSkipped: value.reposSkipped ?? 0,
+        }
+      },
+    },
+    {
+      name: 'git_multirepo_changes',
+      description: 'Read-only list of staged, unstaged, untracked and conflicted files across every repository in the session workspace, with per-file line counts. Use it before explaining or reviewing uncommitted work.',
+      parameters: {
+        type: 'object',
+        properties: {
+          root: rootParameter,
+          depth: { type: 'number', description: 'Directory scan depth, 1-10 (default 4).' },
+        },
+      },
+      output: TOOL_OUTPUT,
+      timeoutMs: TOOL_REQUEST_TIMEOUT_MS,
+      async execute(args, exec) {
+        const root = toolRoot(toolOptionalString(args, 'root'), exec, ctx)
+        if (root === null) throw new Error('invalid-root: no workspace root in this session')
+        const value = await toolJson(ROUTE_WORKTREE, {
+          root,
+          depth: String(toolNumber(args, 'depth', 4, 1, 10)),
+        }, ctx, exec.signal)
+        return {
+          root: value.root,
+          totalRepos: value.totalRepos,
+          dirtyRepos: value.dirtyRepos,
+          cleanRepos: value.cleanRepos,
+          totalFiles: value.totalFiles,
+          truncated: value.truncated === true,
+          reposTruncated: value.reposTruncated === true,
+          reposSkipped: value.reposSkipped ?? 0,
+          repos: value.repos.map(compactChangeRepo),
+        }
+      },
+    },
+    {
+      name: 'git_multirepo_commit',
+      description: 'Read one commit of a repository in the workspace: message, author, parents and the changed-file list with line counts. Read-only.',
+      parameters: {
+        type: 'object',
+        properties: {
+          repo: { type: 'string', description: 'Absolute repository path (as returned by git_multirepo_state).' },
+          hash: { type: 'string', description: 'Commit hash (short or full).' },
+        },
+        required: ['repo', 'hash'],
+      },
+      output: TOOL_OUTPUT,
+      timeoutMs: 60000,
+      async execute(args, exec) {
+        const repo = toolRepo(toolString(args, 'repo'), exec, ctx)
+        if (repo === null) throw new Error('invalid-repo')
+        const hash = toolString(args, 'hash')
+        if (!REQUEST_HASH.test(hash)) throw new Error('invalid-hash')
+        const value = await toolJson(ROUTE_COMMIT, { repo, hash }, ctx, exec.signal)
+        return {
+          repo,
+          hash: value.hash,
+          short: value.short,
+          subject: value.subject,
+          body: truncate(value.body ?? '', 4000),
+          author: value.author,
+          committer: value.committer,
+          parents: value.parents,
+          refs: value.refs,
+          stat: value.stat,
+          files: value.files.slice(0, 200),
+          filesTruncated: value.filesTruncated === true || value.files.length > 200,
+        }
+      },
+    },
+    {
+      name: 'git_multirepo_commit_diff',
+      description: 'Read the unified diff of one file in a commit. Read-only; the diff is bounded and reports truncation.',
+      parameters: {
+        type: 'object',
+        properties: {
+          repo: { type: 'string', description: 'Absolute repository path.' },
+          hash: { type: 'string', description: 'Commit hash (short or full).' },
+          file: { type: 'string', description: 'Repository-relative file path.' },
+        },
+        required: ['repo', 'hash', 'file'],
+      },
+      output: TOOL_OUTPUT,
+      timeoutMs: 60000,
+      async execute(args, exec) {
+        const repo = toolRepo(toolString(args, 'repo'), exec, ctx)
+        if (repo === null) throw new Error('invalid-repo')
+        const hash = toolString(args, 'hash')
+        if (!REQUEST_HASH.test(hash)) throw new Error('invalid-hash')
+        const file = toolString(args, 'file')
+        const fileError = safeRelativePath(file)
+        if (fileError !== null) throw new Error(fileError)
+        return toolJson(ROUTE_PATCH, { repo, hash, file }, ctx, exec.signal)
+      },
+    },
+    {
+      name: 'git_multirepo_change_diff',
+      description: 'Read the unified diff of one uncommitted file: scope staged, unstaged or untracked. Read-only; untracked files are synthesized locally with a size limit.',
+      parameters: {
+        type: 'object',
+        properties: {
+          repo: { type: 'string', description: 'Absolute repository path.' },
+          scope: { type: 'string', description: 'One of staged, unstaged, untracked.' },
+          file: { type: 'string', description: 'Repository-relative file path.' },
+        },
+        required: ['repo', 'scope', 'file'],
+      },
+      output: TOOL_OUTPUT,
+      timeoutMs: 60000,
+      async execute(args, exec) {
+        const repo = toolRepo(toolString(args, 'repo'), exec, ctx)
+        if (repo === null) throw new Error('invalid-repo')
+        const scope = toolString(args, 'scope')
+        if (!WORKTREE_SCOPES.has(scope)) throw new Error('invalid-scope')
+        const file = toolString(args, 'file')
+        const fileError = safeRelativePath(file)
+        if (fileError !== null) throw new Error(fileError)
+        return toolJson(ROUTE_WORKTREE_DIFF, { repo, scope, file }, ctx, exec.signal)
+      },
+    },
+  ]
+}
+
+/** 工作区改动范围集合。 */
+const WORKTREE_SCOPES = new Set(['staged', 'unstaged', 'untracked'])
+
+/**
+ * 只读工具与使用说明只在宿主提供相应服务时注册；旧宿主上静默跳过，不影响插件加载。
+ * @param {any} ctx cordis 上下文。
+ */
+function registerAgentSurface(ctx) {
+  if (typeof ctx.inject !== 'function') return
+  ctx.inject(['tools'], (injected) => {
+    const register = () => {
+      const tools = injected.get('tools')
+      const disposers = agentToolDefinitions(ctx).map((tool) => tools.register(tool))
+      return () => {
+        for (const dispose of disposers) if (typeof dispose === 'function') dispose()
+      }
+    }
+    if (typeof injected.effect === 'function') injected.effect(register, 'git-multirepo: agent tools')
+    else ctx.effect(register, 'git-multirepo: agent tools')
+  })
+  ctx.inject(['systemPrompt'], (injected) => {
+    const register = () => {
+      const systemPrompt = injected.get('systemPrompt')
+      // 与内置工具说明放在同一段：向宿主请求集中分配的 order，旧宿主回退到 TOOLS_SDK 数值。
+      const requested = typeof systemPrompt.getSectionOrder === 'function'
+        ? systemPrompt.getSectionOrder('TOOLS_SDK')
+        : 5000
+      const dispose = systemPrompt.section({
+        name: 'git-multirepo/usage',
+        order: Number.isFinite(requested) ? requested : 5000,
+        text: () => AGENT_GUIDANCE,
+      })
+      return typeof dispose === 'function' ? dispose : undefined
+    }
+    if (typeof injected.effect === 'function') injected.effect(register, 'git-multirepo: agent guidance')
+    else ctx.effect(register, 'git-multirepo: agent guidance')
+  })
+}
+
+export { createToolBudget, renderToolResult }
+
 /**
  * Host 半：在 Connection 的 authenticated exact route registry 上注册接口。
  * @param {any} ctx cordis 上下文。
@@ -1759,4 +2284,5 @@ export function apply(ctx) {
       }),
     'git-multirepo: worktree diff route',
   )
+  registerAgentSurface(ctx)
 }

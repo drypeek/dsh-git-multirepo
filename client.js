@@ -75,6 +75,13 @@ window.__ModuleLoader__.load({
       'fetch.untriedNote': '超时前尚未开始的仓库没有尝试拉取。',
       'fetch.unknownError': '未知错误',
       'fetch.timeoutWithFailures': '等待超时，超时前有 {count} 个仓库没拉取成功，剩下的仓库先跳过了',
+      'chat.add': '添加到对话',
+      'chat.addHint': '把该提交的引用插入对话输入框，再输入你的问题',
+      'chat.menuLabel': '提交操作',
+      'chat.menuHint': '右键添加到对话',
+      'chat.added': '已添加到对话',
+      'chat.addFailed': '添加到对话失败，请重试',
+      'chat.dismiss': '关闭提示',
       'upstream.ahead': '领先远程 {count} 个提交（本地未推送）',
       'upstream.behind': '落后远程 {count} 个提交（需要拉取）',
       'branch.current': '当前分支',
@@ -219,6 +226,13 @@ window.__ModuleLoader__.load({
       'fetch.untriedNote': 'Repositories not reached before the timeout were not attempted.',
       'fetch.unknownError': 'Unknown error',
       'fetch.timeoutWithFailures': 'Timed out; {count} repositories had failed before the remaining ones were skipped',
+      'chat.add': 'Add to chat',
+      'chat.addHint': 'Insert a reference to this commit into the chat input, then write your question',
+      'chat.menuLabel': 'Commit actions',
+      'chat.menuHint': 'Right-click to add to chat',
+      'chat.added': 'Added to chat',
+      'chat.addFailed': 'Could not add to chat; please try again',
+      'chat.dismiss': 'Dismiss',
       'upstream.ahead': '{count} commits ahead of upstream (not pushed)',
       'upstream.behind': '{count} commits behind upstream (needs fetch)',
       'branch.current': 'Current branch',
@@ -413,6 +427,10 @@ window.__ModuleLoader__.load({
 .gm-fetch-toast-repo{flex:none;font-weight:600;color:var(--dsw-alias-label-primary)}
 .gm-fetch-toast-msg{flex:auto;min-width:0}
 .gm-fetch-toast-detail-skip .gm-fetch-toast-msg{opacity:.75}
+.gm-menu-layer{position:fixed;inset:0;z-index:1000}
+.gm-menu{position:fixed;min-width:160px;padding:4px;border:.5px solid var(--dsw-alias-border-l1);border-radius:6px;background:var(--dsw-alias-bg-base);box-shadow:0 8px 24px rgba(0,0,0,.18);display:flex;flex-direction:column}
+.gm-menu-item{display:flex;align-items:center;border:0;background:0 0;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;line-height:1.6;padding:6px 10px;border-radius:4px;cursor:pointer;text-align:left;white-space:nowrap}
+.gm-menu-item:hover,.gm-menu-item:focus-visible{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.16));outline:none}
 .gm-list{flex:auto;min-height:0;overflow:auto;padding:2px 0 24px;position:relative}
 .gm-list::-webkit-scrollbar-track{margin:2px}
 .gm-row{display:flex;align-items:flex-start;gap:10px;padding:4px 20px;cursor:pointer;outline:none;scroll-margin-top:56px}
@@ -441,6 +459,10 @@ window.__ModuleLoader__.load({
 .gm-author{flex:none;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .gm-time{flex:none;margin-left:auto;padding-left:8px;color:var(--dsw-alias-label-primary);font-size:12px;font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap}
 .gm-hash{flex:none;font-family:var(--dsh-code-font-family,ui-monospace,SFMono-Regular,Consolas,monospace);opacity:.85}
+.gm-row-pending{background:color-mix(in srgb,var(--dsw-alias-brand-primary) 6%,transparent)}
+.gm-row-busy{flex:none;align-self:center;width:10px;height:10px;border:1.5px solid var(--dsw-alias-label-secondary);border-top-color:transparent;border-radius:50%;animation:gm-spin .8s linear infinite}
+@keyframes gm-spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion: reduce){.gm-row-busy{animation:none}}
 .gm-merge{flex:none;font-size:10px;line-height:1.5;padding:0 5px;border-radius:3px;background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l1);color:var(--dsw-alias-label-secondary)}
 .gm-badge{flex:none;font-size:10px;line-height:1.5;padding:0 5px;border-radius:3px;border:.5px solid var(--dsw-alias-border-l1);color:var(--dsw-alias-label-secondary);white-space:nowrap}
 .gm-badge-head{color:var(--dsw-alias-brand-primary);border-color:color-mix(in srgb,var(--dsw-alias-brand-primary) 45%,transparent)}
@@ -454,7 +476,7 @@ window.__ModuleLoader__.load({
 .gm-merge-hash{flex:none;font-family:var(--dsh-code-font-family,ui-monospace,SFMono-Regular,Consolas,monospace);color:var(--dsw-alias-label-secondary);opacity:.85}
 .gm-range{flex:none;font:inherit;font-size:12px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-sm,4px);padding:4px 6px;outline:none;cursor:pointer}
 .gm-detail{margin:0 20px 10px 33px;padding:10px 14px;border:.5px solid var(--dsw-alias-border-l1);border-radius:6px;background:var(--dsw-alias-bg-layer-1);font-size:12px;line-height:1.6}
-.gm-detail-loading{color:var(--dsw-alias-label-secondary)}
+.gm-detail-loading{color:var(--dsw-alias-label-secondary);min-height:56px;display:flex;align-items:center;justify-content:center}
 .gm-detail-error{color:var(--dsw-alias-state-error-primary)}
 .gm-detail-grid{display:grid;grid-template-columns:64px minmax(0,1fr);gap:3px 12px;align-items:baseline}
 .gm-detail-key{color:var(--dsw-alias-label-secondary);font-size:11px}
@@ -783,6 +805,68 @@ window.__ModuleLoader__.load({
         ),
       )
     }
+
+    /** 生成插入对话输入框的提交引用标记，发送后由 UserText 渲染成胶囊。 */
+    function commitReference(commit) {
+      const short = typeof commit.short === 'string' && commit.short !== ''
+        ? commit.short
+        : String(commit.hash ?? '').slice(0, 8)
+      return `[commit:${encodeURIComponent(commit.repo)}@${short}]\n`
+    }
+
+    /** 提交引用标记的正则；仓库名允许 URL 编码后出现 `]`、空格或 `@`。 */
+    const COMMIT_REFERENCE_PATTERN = /\[commit:([^\]\s]+?)@([0-9a-fA-F]{4,64})\]/g
+
+    /** 提交操作菜单的 DOM id，供提交行的 aria-controls 引用。 */
+    const COMMIT_MENU_ID = 'git-multirepo-commit-menu'
+
+    /** UserText 规则：把 `[commit:repo@hash]` 标记解析成行内节点。 */
+    const COMMIT_REFERENCE_RULE = {
+      id: 'git-commit',
+      order: 40,
+      match(text, from) {
+        COMMIT_REFERENCE_PATTERN.lastIndex = from
+        for (let match = COMMIT_REFERENCE_PATTERN.exec(text); match !== null; match = COMMIT_REFERENCE_PATTERN.exec(text)) {
+          let repo = match[1]
+          try {
+            repo = decodeURIComponent(match[1])
+          } catch {
+            // 保持原样：非法编码由渲染器显示为原始标记内容。
+          }
+          return {
+            id: 'git-commit',
+            start: match.index,
+            end: match.index + match[0].length,
+            data: { repo, hash: match[2] },
+          }
+        }
+        return undefined
+      },
+    }
+
+    /** 行内提交引用胶囊；草稿编辑器里若未做节点渲染，则显示原始标记。 */
+    function CommitReference({ node, raw }) {
+      const repo = typeof node?.data?.repo === 'string' ? node.data.repo : ''
+      const hash = typeof node?.data?.hash === 'string' ? node.data.hash : ''
+      return h(
+        'span',
+        {
+          className: 'gm-commit-chip',
+          title: typeof raw === 'string' ? raw : `${repo}@${hash}`,
+        },
+        h('span', { className: 'gm-commit-chip-dot' }),
+        h('span', { className: 'gm-commit-chip-repo' }, repo),
+        h('span', { className: 'gm-commit-chip-hash' }, hash.slice(0, 8)),
+      )
+    }
+
+    /** 提交引用胶囊的全局样式：它在 Chat 视图里渲染，不能依赖 Git 视图的 STYLE。 */
+    const COMMIT_CHIP_STYLE = `
+.gm-commit-chip{display:inline-flex;align-items:center;gap:4px;padding:1px 7px;border:.5px solid var(--dsw-alias-border-l1);border-radius:999px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-size:.92em;line-height:1.5;white-space:nowrap;vertical-align:baseline}
+.gm-commit-chip-dot{width:7px;height:7px;border-radius:50%;background:var(--dsw-alias-brand-primary);flex:none}
+.gm-commit-chip-repo{font-weight:600;max-width:220px;overflow:hidden;text-overflow:ellipsis}
+.gm-commit-chip-hash{font-family:var(--dsh-code-font-family,ui-monospace,SFMono-Regular,Consolas,monospace);color:var(--dsw-alias-label-secondary);font-size:.92em}
+`
 
     /** 拉取图标。 */
     function FetchGlyph() {
@@ -1319,7 +1403,7 @@ window.__ModuleLoader__.load({
         return count(repo.conflicted) + count(repo.staged) + count(repo.unstaged) + count(repo.untracked)
       }
       /** 所有仓库提交合并成的一条时间线。 */
-      return function GitView({ sessionId, useSessions }) {
+      return function GitView({ sessionId, useSessions, inputActions }) {
         const cwd = useSessions((sessions) => sessions.byId[sessionId]?.cwd)
 
         const [allBranches, setAllBranches] = useState(false)
@@ -1330,9 +1414,13 @@ window.__ModuleLoader__.load({
         const [collapsedRemote, setCollapsedRemote] = useState(true)
         const [collapsedLocal, setCollapsedLocal] = useState(false)
         const [expandedKey, setExpandedKey] = useState(null)
+        // 详情尚未缓存时先在行内显示加载状态，数据就绪后再展开，避免面板先出现占位再撑开造成跳动。
+        const [pendingExpandKey, setPendingExpandKey] = useState(null)
         const [details, setDetails] = useState({})
         const [fetching, setFetching] = useState(false)
         const [fetchReport, setFetchReport] = useState(null)
+        const [chatMenu, setChatMenu] = useState(null)
+        const [chatNotice, setChatNotice] = useState(null)
         const [state, setState] = useState({ status: 'idle', data: null, failure: null, key: '' })
         const [confirmingFetch, setConfirmingFetch] = useState(false)
         const [fetchDetailsOpen, setFetchDetailsOpen] = useState(false)
@@ -1346,6 +1434,8 @@ window.__ModuleLoader__.load({
         const fetchAbortRef = useRef(null)
         const changesAbortRef = useRef(null)
         const detailAbortsRef = useRef(new Map())
+        // 等待展开详情的提交键；数据就绪后在原行下方一次性展开，不做滚动重定位。
+        const pendingExpandRef = useRef(null)
         const rootRef = useRef(null)
         const fetchDialogRef = useRef(null)
         const fetchButtonElRef = useRef(null)
@@ -1357,6 +1447,16 @@ window.__ModuleLoader__.load({
         // Keep the current view identity available to async callbacks immediately after a render.
         viewKeyRef.current = viewKey
         workspaceKeyRef.current = cwd
+        /** 打开菜单的提交行元素；菜单关闭后把键盘焦点还给它。 */
+        const menuTriggerRef = useRef(null)
+        /** 提示自动消失的定时器。 */
+        const noticeTimerRef = useRef(null)
+        /** 当前工作区已加载的仓库名集合，用于校验提交是否属于当前 workspace。 */
+        const knownRepoNamesRef = useRef(new Set())
+        {
+          const repos = Array.isArray(state.data?.repos) ? state.data.repos : []
+          knownRepoNamesRef.current = new Set(repos.map((repo) => repo?.name).filter((name) => typeof name === 'string'))
+        }
 
         /** 打开右侧栏差异页签；失败时把原因显示在视图里而不是抛出。 */
         const openDiffSafe = useCallback(
@@ -1382,12 +1482,26 @@ window.__ModuleLoader__.load({
           [openWorktreeDiff],
         )
 
+        /** 关闭提交操作菜单；焦点由下面的 effect 还给触发它的提交行。 */
+        const closeChatMenu = useCallback(() => setChatMenu(null), [])
+
+        /** 显示一条会自动消失的状态提示，并在下一次提示时重置计时。 */
+        const showChatNotice = useCallback((kind, message) => {
+          setChatNotice({ kind, message })
+          if (noticeTimerRef.current !== null) clearTimeout(noticeTimerRef.current)
+          noticeTimerRef.current = setTimeout(() => {
+            noticeTimerRef.current = null
+            setChatNotice(null)
+          }, 4000)
+        }, [])
+
         useEffect(
           () => () => {
             fetchAbortRef.current?.abort()
             changesAbortRef.current?.abort()
             for (const controller of detailAbortsRef.current.values()) controller.abort()
             detailAbortsRef.current.clear()
+            if (noticeTimerRef.current !== null) clearTimeout(noticeTimerRef.current)
           },
           [],
         )
@@ -1504,6 +1618,8 @@ window.__ModuleLoader__.load({
           setFetching(false)
           setHiddenRepos([])
           setExpandedKey(null)
+          pendingExpandRef.current = null
+          setPendingExpandKey(null)
           setDetails({})
           setFetchReport(null)
           setFetchDetailsOpen(false)
@@ -1512,6 +1628,14 @@ window.__ModuleLoader__.load({
           setOpenDiffError(null)
           setCollapsedChangeRepos([])
           setChangesState({ status: 'idle', data: null, failure: null, key: '' })
+          // 菜单与提示都属于旧工作区，切换 cwd 后不能继续操作旧的提交。
+          setChatMenu(null)
+          setChatNotice(null)
+          menuTriggerRef.current = null
+          if (noticeTimerRef.current !== null) {
+            clearTimeout(noticeTimerRef.current)
+            noticeTimerRef.current = null
+          }
         }, [cwd])
 
         // Search and time filters belong to a workspace, so do not carry them into a new cwd.
@@ -1519,6 +1643,31 @@ window.__ModuleLoader__.load({
           setQuery('')
           setTimeRange('all')
         }, [cwd])
+
+        // 菜单关闭后把焦点还给触发它的提交行，避免焦点落到 body。
+        useEffect(() => {
+          if (chatMenu !== null) return
+          const trigger = menuTriggerRef.current
+          menuTriggerRef.current = null
+          if (trigger !== null && typeof trigger.focus === 'function') trigger.focus()
+        }, [chatMenu])
+
+        // 右键菜单在页面滚动或按 Esc 时关闭；测试环境的 DOM 桩下跳过绑定。
+        useEffect(() => {
+          if (chatMenu === null) return undefined
+          if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') return undefined
+          const close = closeChatMenu
+          const onKeyDown = (event) => {
+            if (event.key === 'Escape') close()
+          }
+          document.addEventListener('keydown', onKeyDown)
+          const scroller = typeof window !== 'undefined' && typeof window.addEventListener === 'function' ? window : null
+          scroller?.addEventListener('scroll', close, true)
+          return () => {
+            document.removeEventListener('keydown', onKeyDown)
+            scroller?.removeEventListener('scroll', close, true)
+          }
+        }, [chatMenu, closeChatMenu])
 
         useEffect(() => {
           if (typeof cwd !== 'string' || cwd === '') {
@@ -1808,8 +1957,13 @@ window.__ModuleLoader__.load({
         const loadDetail = useCallback(
           (key, commit, force = false) => {
             const entry = details[key]
+            const active = detailAbortsRef.current.get(key)
+            // An aborted request leaves the entry in "loading" state. Treat it as
+            // retryable so cancelling a pending row and opening it again works.
+            const staleLoading = entry?.status === 'loading' && (active === undefined || active.signal.aborted)
             if (
               !force &&
+              !staleLoading &&
               (entry?.status === 'loading' || entry?.status === 'ready' || detailCache.has(key))
             ) {
               return
@@ -1844,6 +1998,11 @@ window.__ModuleLoader__.load({
                 setDetails((current) =>
                   rememberRecord(current, key, { status: 'ready', data: payload }, DETAIL_CACHE_LIMIT),
                 )
+                if (pendingExpandRef.current === key) {
+                  pendingExpandRef.current = null
+                  setPendingExpandKey(null)
+                  setExpandedKey(key)
+                }
               })
               .catch((error) => {
                 if (controller.signal.aborted || workspaceKeyRef.current !== cwd) return
@@ -1855,6 +2014,11 @@ window.__ModuleLoader__.load({
                     DETAIL_CACHE_LIMIT,
                   ),
                 )
+                if (pendingExpandRef.current === key) {
+                  pendingExpandRef.current = null
+                  setPendingExpandKey(null)
+                  setExpandedKey(key)
+                }
               })
               .finally(() => {
                 if (detailAbortsRef.current.get(key) === controller) detailAbortsRef.current.delete(key)
@@ -1866,10 +2030,32 @@ window.__ModuleLoader__.load({
         const toggleCommit = useCallback(
           (commit) => {
             const key = getDetailKey(commit)
-            setExpandedKey((current) => (current === key ? null : key))
+            if (expandedKey === key) {
+              pendingExpandRef.current = null
+              setPendingExpandKey(null)
+              setExpandedKey(null)
+              return
+            }
+            if (pendingExpandKey === key) {
+              // 再次点击正在加载的提交行：取消这次的等待，不展开。
+              pendingExpandRef.current = null
+              setPendingExpandKey(null)
+              detailAbortsRef.current.get(key)?.abort()
+              return
+            }
+            const entry = details[key]
+            if (entry?.status === 'ready' || entry?.status === 'error' || detailCache.has(key)) {
+              pendingExpandRef.current = null
+              setPendingExpandKey(null)
+              setExpandedKey(key)
+              return
+            }
+            // 数据未就绪：先在行内转圈，等详情返回后在原位置一次性向下展开。
+            pendingExpandRef.current = key
+            setPendingExpandKey(key)
             loadDetail(key, commit)
           },
-          [getDetailKey, loadDetail],
+          [details, expandedKey, pendingExpandKey, getDetailKey, loadDetail],
         )
 
         const runFetch = useCallback((options = {}) => {
@@ -1898,6 +2084,8 @@ window.__ModuleLoader__.load({
                 fetchConfirmedRoots.set(requestWorkspace, Date.now())
               }
               setExpandedKey(null)
+              pendingExpandRef.current = null
+              setPendingExpandKey(null)
               setDetails({})
               setReloadToken((value) => value + 1)
             })
@@ -1914,6 +2102,20 @@ window.__ModuleLoader__.load({
               setFetching(false)
             })
         }, [cwd, t])
+
+        /** 把提交引用插入当前对话输入框；返回是否真正插入成功，供调用方提示。 */
+        const attachToChat = useCallback(
+          (commit) => {
+            if (typeof cwd !== 'string' || cwd === '') return false
+            if (typeof commit?.hash !== 'string' || commit.hash === '') return false
+            // commit.repo 是工作区相对仓库名；只有当前工作区加载出的仓库才允许插入，
+            // 避免 cwd 切换后把旧 workspace 的提交引用发进新对话。
+            if (typeof commit?.repo !== 'string' || !knownRepoNamesRef.current.has(commit.repo)) return false
+            if (typeof inputActions?.captureInsertion !== 'function' || typeof inputActions?.insertText !== 'function') return false
+            return inputActions.insertText(commitReference(commit), inputActions.captureInsertion()) === true
+          },
+          [cwd, inputActions],
+        )
 
         /** 切换视图模式并持久化；刷新页面后仍停留在同一模式。 */
         const switchMode = useCallback((next) => {
@@ -2099,6 +2301,70 @@ window.__ModuleLoader__.load({
                 () => setFetchReport(null),
                 fetchDetailsOpen,
                 () => setFetchDetailsOpen((value) => !value),
+              )
+
+
+        // 右键菜单贴住光标；屏幕边缘时向视口内收，避免被裁掉。
+        const viewportWidth = typeof window !== 'undefined' && Number.isFinite(window.innerWidth) ? window.innerWidth : 1024
+        const viewportHeight = typeof window !== 'undefined' && Number.isFinite(window.innerHeight) ? window.innerHeight : 768
+        const chatMenuLayer =
+          chatMenu === null
+            ? null
+            : h(
+                'div',
+                { className: 'gm-menu-layer', onClick: closeChatMenu },
+                h(
+                  'div',
+                  {
+                    id: COMMIT_MENU_ID,
+                    className: 'gm-menu',
+                    role: 'menu',
+                    'aria-label': t('chat.menuLabel'),
+                    style: {
+                      left: `${Math.max(8, Math.min(chatMenu.x, viewportWidth - 180))}px`,
+                      top: `${Math.max(8, Math.min(chatMenu.y, viewportHeight - 48))}px`,
+                    },
+                    onClick: (event) => event.stopPropagation(),
+                    onContextMenu: (event) => event.preventDefault(),
+                  },
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      role: 'menuitem',
+                      className: 'gm-menu-item',
+                      autoFocus: true,
+                      title: t('chat.addHint'),
+                      onClick: () => {
+                        const commit = chatMenu.commit
+                        closeChatMenu()
+                        const inserted = attachToChat(commit)
+                        showChatNotice(inserted ? 'ok' : 'error', t(inserted ? 'chat.added' : 'chat.addFailed'))
+                      },
+                    },
+                    t('chat.add'),
+                  ),
+                ),
+              )
+
+        // 插入成功/失败都用可关闭、会自动消失的提示反馈，不再静默失败。
+        const chatNoticeBanner =
+          chatNotice === null
+            ? null
+            : h(
+                'div',
+                { className: 'gm-confirm', role: 'status', 'aria-live': 'polite', 'data-gm-notice': chatNotice.kind },
+                h('span', { className: 'gm-confirm-text' }, chatNotice.message),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'gm-tool',
+                    'aria-label': t('chat.dismiss'),
+                    onClick: () => setChatNotice(null),
+                  },
+                  t('chat.dismiss'),
+                ),
               )
 
         if (state.status === 'no-workspace') {
@@ -2639,6 +2905,8 @@ window.__ModuleLoader__.load({
         const pushRow = (commit) => {
           const key = getDetailKey(commit)
           const expanded = expandedKey === key
+          const pending = pendingExpandKey === key
+          const menuOpen = chatMenu !== null && chatMenu.key === key
           const color = colors.get(commit.repo) ?? PALETTE[0]
           const source = branchLabel(commit, repoInfo.get(commit.repo), allBranches)
           const refs = extraRefs(commit.refs, source)
@@ -2650,19 +2918,53 @@ window.__ModuleLoader__.load({
               h(
                 'div',
                 {
-                  className: ['gm-row', expanded ? 'gm-row-open' : '', commit.remoteOnly === true ? 'gm-row-remote' : '']
+                  className: [
+                    'gm-row',
+                    expanded ? 'gm-row-open' : '',
+                    pending ? 'gm-row-pending' : '',
+                    commit.remoteOnly === true ? 'gm-row-remote' : '',
+                  ]
                     .filter(Boolean)
                     .join(' '),
                   role: 'button',
                   tabIndex: 0,
-                  'aria-expanded': expanded,
-                  title: commit.remoteOnly === true ? t('badge.remoteHint') : t('detail.expand'),
+                  'aria-expanded': menuOpen ? true : expanded,
+                  'aria-busy': pending ? 'true' : undefined,
+                  'aria-haspopup': 'menu',
+                  'aria-controls': menuOpen ? COMMIT_MENU_ID : undefined,
+                  title: `${commit.remoteOnly === true ? t('badge.remoteHint') : t('detail.expand')} · ${t('chat.menuHint')}`,
                   onClick: activate,
                   onKeyDown: (event) => {
                     if (event.key === 'Enter' || event.key === ' ') {
                       event.preventDefault()
                       activate()
+                      return
                     }
+                    if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+                      event.preventDefault()
+                      // 键盘没有光标坐标，改为贴在当前行下方；没有 DOM 时回退到左上角。
+                      const rect = typeof event.currentTarget?.getBoundingClientRect === 'function'
+                        ? event.currentTarget.getBoundingClientRect()
+                        : null
+                      menuTriggerRef.current = event.currentTarget ?? null
+                      setChatMenu({
+                        commit,
+                        key,
+                        x: rect === null ? 0 : rect.left + 8,
+                        y: rect === null ? 0 : rect.bottom + 4,
+                      })
+                    }
+                  },
+                  onContextMenu: (event) => {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    menuTriggerRef.current = event.currentTarget ?? null
+                    setChatMenu({
+                      commit,
+                      key,
+                      x: Number.isFinite(event.clientX) ? event.clientX : 0,
+                      y: Number.isFinite(event.clientY) ? event.clientY : 0,
+                    })
                   },
                   'data-gm-repo': commit.repo,
                   'data-gm-head': isHeadRef(commit.refs) ? 'true' : undefined,
@@ -2702,6 +3004,14 @@ window.__ModuleLoader__.load({
                     refs === '' ? null : h('span', { className: 'gm-refs', title: commit.refs }, refs),
                     h('span', { className: 'gm-author', title: commit.author }, commit.author),
                     h('span', { className: 'gm-hash', title: commit.hash }, commit.short),
+                    pending
+                      ? h('span', {
+                          className: 'gm-row-busy',
+                          key: 'busy',
+                          title: t('detail.loading'),
+                          'aria-label': t('detail.loading'),
+                        })
+                      : null,
                   ),
                 ),
               ),
@@ -2868,6 +3178,8 @@ window.__ModuleLoader__.load({
           h('style', null, STYLE),
           toolbar,
           fetchConfirmDialog,
+          chatMenuLayer,
+          chatNoticeBanner,
           diffErrorBanner,
           fetchToast,
           h(
@@ -2950,6 +3262,47 @@ window.__ModuleLoader__.load({
       }
 
       register('git-multirepo: dictionaries', () => ctx.locale.register(NS, { zh, en }))
+
+      register('git-multirepo: chat chip styles', () => {
+        if (typeof document === 'undefined' || typeof document.createElement !== 'function') return undefined
+        if (document.head === null || document.head === undefined) return undefined
+        const style = document.createElement('style')
+        style.textContent = COMMIT_CHIP_STYLE
+        document.head.appendChild(style)
+        return () => style.remove()
+      })
+
+      register('git-multirepo: commit reference rule', () => {
+        const uiConversation = typeof ctx.get === 'function' ? ctx.get('uiConversation', false) : ctx.uiConversation
+        const userText = uiConversation?.userText
+        if (typeof userText?.register === 'function') return userText.register(COMMIT_REFERENCE_RULE)
+        // 服务尚未提供时不能静默跳过：先给出可见日志，再等 uiConversation 就绪后补注册。
+        console.warn('[git-multirepo] uiConversation.userText is not available yet; waiting for the service before registering commit reference markers')
+        if (typeof ctx.inject !== 'function') {
+          console.error('[git-multirepo] cannot wait for uiConversation: ctx.inject is unavailable; commit reference markers will not render')
+          return undefined
+        }
+        ctx.inject(['uiConversation'], (injected) => {
+          injected.effect(() => {
+            const lateUserText = injected.get('uiConversation')?.userText
+            if (typeof lateUserText?.register !== 'function') {
+              console.error('[git-multirepo] uiConversation is available but userText.register is missing; commit reference markers will not render')
+              return undefined
+            }
+            return lateUserText.register(COMMIT_REFERENCE_RULE)
+          }, 'git-multirepo: commit reference rule (deferred)')
+        })
+        return undefined
+      })
+
+      register('git-multirepo: commit reference chip', () =>
+        ctx.slots.inject('conversation.user.text.node', () =>
+          ctx.slots.register(
+            { name: 'conversation.user.text.node', key: 'git-commit', priority: 100, locale: NS },
+            CommitReference,
+          ),
+        ),
+      )
 
       /** 在右侧栏打开一个文件的差异页签。 */
       const openDiff = (repo, hash, file) => {
