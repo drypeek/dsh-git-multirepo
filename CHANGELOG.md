@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here. Versions follow [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.2.2 — 2026-11-17
 
 ### Added
 
@@ -12,6 +12,11 @@ All notable changes to this project are documented here. Versions follow [Semant
 ### Changed
 
 - Commit details now expand in place only after their data is ready. While an uncached detail is loading the row shows a small inline spinner (`aria-busy`) instead of mounting an empty panel, and expanding a detail never scrolls or repositions the list; if the opened content extends past the viewport it simply stays there rather than being nudged into view.
+- The README, plugin descriptions and repository description now explain the feature in plainer language.
+
+### Fixed
+
+- Retrying a cancelled commit detail request now loads the detail instead of leaving the row stuck in a permanent loading state.
 
 ## 0.2.1 — 2026-11-16
 
