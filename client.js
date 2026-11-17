@@ -1957,8 +1957,13 @@ window.__ModuleLoader__.load({
         const loadDetail = useCallback(
           (key, commit, force = false) => {
             const entry = details[key]
+            const active = detailAbortsRef.current.get(key)
+            // An aborted request leaves the entry in "loading" state. Treat it as
+            // retryable so cancelling a pending row and opening it again works.
+            const staleLoading = entry?.status === 'loading' && (active === undefined || active.signal.aborted)
             if (
               !force &&
+              !staleLoading &&
               (entry?.status === 'loading' || entry?.status === 'ready' || detailCache.has(key))
             ) {
               return

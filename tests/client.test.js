@@ -1732,3 +1732,33 @@ test('commit detail expands only after its data is ready', async () => {
   assert.doesNotMatch(textContent(renderer.tree), /READY DETAIL/, 'second click collapses the detail')
   renderer.unmount()
 })
+
+test('reopening a cancelled commit detail starts a fresh request', async () => {
+  const requests = []
+  const client = loadClient(requestFetch(requests))
+  const renderer = new HookRenderer(client.view, null)
+  renderer.cwd = 'C:/retry-workspace'
+  renderer.props = viewProps(renderer)
+  renderer.render()
+  const hash = 'e'.repeat(40)
+  deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'RETRY', hash))
+  await renderer.flush()
+
+  const openRow = () => findOne(renderer.tree, (node) => node.props?.['data-gm-head'] === 'true').props.onClick()
+  openRow()
+  await renderer.flush()
+  assert.equal(requests.filter((entry) => entry.kind === 'commit').length, 1)
+
+  // Cancel the pending row, then open it again. The aborted request must not
+  // leave the detail stuck in loading.
+  openRow()
+  await renderer.flush()
+  openRow()
+  await renderer.flush()
+  const commitRequests = requests.filter((entry) => entry.kind === 'commit')
+  assert.equal(commitRequests.length, 2, 'a cancelled pending detail should retry')
+  commitRequests.at(-1).resolve(detailValue(hash, 'RESTARTED DETAIL'))
+  await renderer.flush()
+  assert.match(textContent(renderer.tree), /RESTARTED DETAIL/)
+  renderer.unmount()
+})
