@@ -1,12 +1,12 @@
 # dsh-git-multirepo
 
-View commits and working-tree changes from several Git repositories together in DSH.
+See commits and uncommitted changes from several Git repositories in one DSH tab.
 
 English · [简体中文](https://github.com/drypeek/dsh-git-multirepo/blob/main/README-zh.md)
 
-If a workspace contains separate frontend, backend, or tooling repositories, the **Git log** tab shows their commits and uncommitted changes in one place. Each commit and changed file is labelled with its repository.
+If your workspace holds separate frontend, backend, or tooling repositories, the **Git log** tab brings their history onto one timeline. Each commit and changed file is labelled with its repository, so you can follow what changed without opening every folder.
 
-This is a third-party plugin for DeepSeek Harness (DSH), with no affiliation to DeepSeek.
+This is a third-party plugin for DeepSeek Harness (DSH), not an official DeepSeek project.
 
 [![npm version](https://img.shields.io/npm/v/dsh-git-multirepo)](https://www.npmjs.com/package/dsh-git-multirepo)
 [![npm downloads](https://img.shields.io/npm/dm/dsh-git-multirepo)](https://www.npmjs.com/package/dsh-git-multirepo)
@@ -19,16 +19,16 @@ This is a third-party plugin for DeepSeek Harness (DSH), with no affiliation to 
 
 ## Features
 
-- Browse the current branch or all branches. In current-branch mode, incoming remote commits have their own section.
-- **Working tree changes** view: staged, unstaged, untracked and conflicted files from every repository, grouped by repository. Click a file to open its diff in the right sidebar.
-- Expand commit messages and changed files; open a file diff in the right sidebar.
+- Browse the current branch or all branches. In current-branch mode, incoming remote commits get their own section.
+- Open **Working tree changes** to see staged, unstaged, untracked and conflicted files from every repository, grouped by repository. Click a file to view its diff in the right sidebar.
+- Expand a commit to read its message and changed files, then click a file to open the diff.
 - Filter by repository, date, commit message, author, or short hash.
-- Check uncommitted changes and ahead/behind counts, and fetch updates for multiple repositories.
-- Ask the AI about the workspace: right-click a commit row and choose **Add to chat** to insert a compact marker (`[commit:repository@hash]`) into the chat input. Add one or more commits, write your own question, and send them together. Sent messages render each marker as an inline chip; the agent reads the marker, calls the read-only `git_multirepo_state` tool to map the percent-encoded workspace-relative repository name to its path, then uses `git_multirepo_commit`, `git_multirepo_commit_diff` or `git_multirepo_change_diff` as needed. (The draft input shows the raw marker until it is sent.)
+- Check for uncommitted work and ahead/behind counts, and fetch updates for several repositories at once.
+- **Ask the AI about a commit.** Right-click a commit row and choose **Add to chat**; a short reference goes into the chat input. Add your question and send, and the agent can read the commit and its diff using the plugin's read-only tools.
 
 ## Installation
 
-Requires DSH 0.2.1-rc.5 through 0.2.x, Git 2.36+, and a Node.js 20+ runtime.
+You'll need DSH 0.2.1-rc.5 through 0.2.x, Git 2.36 or newer, and a Node.js 20+ runtime.
 
 Install from npm ([dsh-git-multirepo](https://www.npmjs.com/package/dsh-git-multirepo)). In the DSH desktop app, open **Plugins → Add plugin → Install a third-party plugin** and enter `dsh-git-multirepo`, or run:
 
@@ -36,15 +36,15 @@ Install from npm ([dsh-git-multirepo](https://www.npmjs.com/package/dsh-git-mult
 dsh plugin --profile <profile> add dsh-git-multirepo
 ```
 
-Installation enables the bundle by default; re-enable it on the Plugins page if you previously switched it off. Restart the desktop app after installing or updating; for the Web GUI, refresh the page. The **Git log** tab then appears beside **Chat** and **Trajectory** in a session.
+The plugin is enabled by default. If you previously turned it off, enable it again on the Plugins page. Restart the desktop app after installing or updating; for the Web GUI, refresh the page. A **Git log** tab then appears next to **Chat** and **Trajectory** in a session.
 
-Other install targets:
+Other ways to install:
 
-- Prebuilt tarball from the latest GitHub Release:
+- Use the prebuilt tarball from the latest GitHub Release:
   ```sh
   dsh plugin --profile <profile> add https://github.com/drypeek/dsh-git-multirepo/releases/latest/download/dsh-git-multirepo.tgz
   ```
-- Local checkout, for development:
+- Link a local checkout for development:
   ```sh
   git clone https://github.com/drypeek/dsh-git-multirepo.git
   dsh plugin --profile <profile> add "link:/absolute/path/to/dsh-git-multirepo"
@@ -52,58 +52,64 @@ Other install targets:
 
 ## Usage
 
-Open **Git log** to scan the current session's working directory. Switching sessions changes the directory shown.
+Open **Git log** to scan the current session's working directory. When you switch sessions, the tab switches to that session's directory too.
 
-Switch between **Commit history** and **Working tree changes** at the top of the tab. The changes view groups files by repository as conflicted, staged, unstaged and untracked. Click a file to open its diff in the right sidebar; search matches file paths and repository names. The view is read-only and offers no staging, commit, or revert actions.
+The tab has two views: **Commit history** and **Working tree changes**. The changes view groups files by repository as conflicted, staged, unstaged and untracked. Click a file to open its diff in the right sidebar; search matches file paths and repository names. This view is read-only—there is no staging, committing, or reverting.
 
-In the commit history view, click a commit to expand its details, then click a filename to open its diff. Repository labels control which repositories appear; use search and the date filter to narrow the list.
+In commit history, click a commit to expand its details, then click a filename to open that file's diff. Repository chips control which repositories appear; search and the date filter narrow the list.
 
-| Button | Action |
+The two update buttons do different things:
+
+| Button | What it does |
 | --- | --- |
-| Refresh | Reread local history, working-tree changes and repository status without fetching remote updates. |
-| Fetch | Run `git fetch --all --prune` in the discovered repositories, then refresh. When repositories are known, a confirmation dialog explains the repository count and read-only behavior before starting. |
+| Refresh | Re-reads local history, working-tree changes, and repository status. It does not contact a remote. |
+| Fetch | Runs `git fetch --all --prune` in the discovered repositories, then refreshes the list. When repositories are known, a confirmation dialog explains the repository count and read-only behavior before it starts. |
 
-The confirmation is remembered per workspace for 10 minutes in the current page session only: a reload asks again, the memory is never written to disk, and a failed or empty fetch does not skip the next confirmation. Result feedback appears in a dismissible banner. Successful fetches close automatically after 3 seconds; partial failures, timeouts and errors stay until dismissed, and their per-repository details (including skipped non-repository directories) can be expanded. A timeout is reported as a timeout, never as success, and the banner stays visible when switching between commit history and working tree changes.
+The confirmation is remembered per workspace for 10 minutes in the current page session. A reload asks again, and nothing is written to disk. A failed fetch also asks again next time. Results appear in a dismissible banner: successful fetches close after 3 seconds, while partial failures, timeouts and errors stay until you dismiss them. You can expand the banner to see per-repository details, including directories that were skipped because they are not repositories. A timeout is reported as a timeout, never as success, and the banner stays visible when you switch between the two views.
 
-The changes view keeps only the refresh button; fetch and go-to-HEAD actions belong to the commit history view.
+The changes view only has **Refresh**; fetch and go-to-HEAD belong to commit history.
 
-Fetch does not run `git pull`, merge branches, or update working-tree files. Incoming commits are shown for inspection; merging them is a separate step.
+Fetch does not run `git pull`, merge branches, or change working-tree files. Incoming commits are shown for inspection, and merging them is up to you.
 
 The chat input is hidden while this tab is open. Switch back to **Chat** to type.
+
+## Asking the AI about a commit
+
+Right-click a commit row and choose **Add to chat**, or press <kbd>Shift</kbd>+<kbd>F10</kbd> and choose it from the menu. The plugin inserts a short reference such as `[commit:web@a1b2c3d]` into the chat input; it does not send a message for you. Add your own question, add more commits if useful, then send. In the sent message each reference becomes a chip, and the agent can look up the repository, commit, and diff with the plugin's read-only tools.
 
 ## Common questions
 
 ### Why is a repository missing?
 
-Check the current session's working directory. By default, discovery scans four levels down and lists up to 100 repositories. It skips hidden directories and dependency/build directories such as `node_modules`, `bin`, `obj`, `dist`, and `target`. The view reports when a scan limit is reached.
+Check the current session's working directory. By default, discovery scans four levels down and lists up to 100 repositories. It skips hidden directories and dependency/build directories such as `node_modules`, `bin`, `obj`, `dist`, and `target`. The view tells you when a scan limit is reached.
 
 ### Why is older history missing?
 
-The list starts with the latest 40 commits per repository and has total count and size limits. Use `git log` in your terminal to browse the full history. Large commit lists, file lists, and diffs may be truncated or produce an error, with a message in the view.
+The list starts with the latest 40 commits per repository and has total count and size limits. For the full history, use `git log` in your terminal. Large commit lists, file lists, and diffs may be truncated or return an error; the view explains what happened.
 
 ### What are the limits of the working tree changes view?
 
 - It is read-only: no staging, committing, reverting, or conflict resolution.
-- Renames appear as a deletion plus an addition; rename relationships are not shown.
-- Untracked directories are collapsed into a single row instead of being expanded.
+- Renames show up as a deletion plus an addition; rename relationships are not shown.
+- Untracked directories are collapsed into one row instead of being expanded.
 - Conflicted files are listed but not rendered (no combined diff yet).
 - Untracked file previews are limited to 512 KB; binary files and symbolic links show status only.
 
 ### Why can't a linked worktree be read?
 
-If its main repository is outside the worktree's workspace, register the main repository as a DSH workspace too. Git metadata and object directories must be inside registered workspaces. Repositories sharing objects through `objects/info/alternates` are not currently supported.
+If its main repository is outside the worktree's workspace, register the main repository as a DSH workspace too. Git metadata and object directories must be inside registered workspaces. Repositories that share objects through `objects/info/alternates` are not supported yet.
 
 ### What should I do about missing objects in a partial clone?
 
-Commit and diff reads do not fetch missing objects automatically. Try **Fetch** first. If the required objects are still missing, retrieve them in your terminal and reopen the diff.
+Commit and diff reads do not fetch missing objects automatically. Try **Fetch** first. If the objects are still missing, retrieve them in your terminal and reopen the diff.
 
 ## Security and privacy
 
-The plugin has no telemetry or analytics. Normal viewing reads local history; Git network transports are enabled only by **Fetch**. The plugin does not commit, push, or merge code.
+The plugin has no telemetry or analytics. Normal viewing reads local history; Git network transports are used only by **Fetch**. The plugin does not commit, push, or merge code.
 
-The working tree changes view uses read-only Git commands (`status`, `diff`, `config`, `rev-parse`). Untracked file previews read file contents directly, confined to the repository, without following symbolic links and with a 512 KB per-file limit.
+The working tree changes view uses read-only Git commands (`status`, `diff`, `config`, `rev-parse`). Untracked file previews read file contents directly, stay inside the repository, do not follow symbolic links, and stop at 512 KB per file.
 
-Fetch uses your existing SSH and Git credential configuration and may run programs configured by a repository. Use it only with repositories you trust. System and global Git configuration are also treated as trusted user configuration.
+Fetch uses your existing SSH and Git credential configuration, and it may run programs configured by a repository. Use it only with repositories you trust. System and global Git configuration are treated as trusted user configuration too.
 
 DSH handles route authentication, and repository paths are restricted to registered workspaces. See [SECURITY.md](https://github.com/drypeek/dsh-git-multirepo/blob/main/SECURITY.md) for the controls, limitations, and vulnerability reporting process.
 
@@ -116,7 +122,7 @@ npm run check
 npm test
 ```
 
-Tests use temporary repositories and local test programs, without contacting external remotes. Both checks also run automatically before `npm publish`.
+Tests use temporary repositories and local test programs and do not contact external remotes. Both checks also run automatically before `npm publish`.
 
 ## License
 
