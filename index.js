@@ -110,8 +110,14 @@ const MERGE_COMMIT_LIMIT = 200
 const MAX_TOTAL_COMMITS = 5000
 /** 远程独有提交的额外取数预算，保证本地 HEAD 不被挤出结果。 */
 const REMOTE_EXTRA_LIMIT = 120
-/** git log 的输出格式：字段以 NUL（%x00）分隔，每条记录以 %x00 收尾，按每 9 个字段一条记录解析。 */
-const LOG_FORMAT = '--pretty=format:%H%x00%h%x00%an%x00%aI%x00%s%x00%D%x00%S%x00%cI%x00%P%x00'
+/** 状态数据里每个提交最多保留的修改文件数，供客户端按文件名搜索。 */
+const COMMIT_FILES_LIMIT = 24
+/** 状态数据里单个文件路径的最大长度。 */
+const COMMIT_FILE_PATH_LIMIT = 260
+/** git log 记录前缀：每条记录以 %x01 开头，避免与文件名、换行混在一起。 */
+const LOG_RECORD_SEP = '\u0001'
+/** git log 的输出格式：字段以 NUL（%x00）分隔，每条记录以 %x00 收尾；配合 --name-only 时记录末尾附带文件列表。 */
+const LOG_FORMAT = `--pretty=format:%x01%H%x00%h%x00%an%x00%aI%x00%s%x00%D%x00%S%x00%cI%x00%P%x00`
 /** 单个文件差异的最大行数。 */
 const PATCH_LINE_LIMIT = 5000
 /** 差异中单行的最大字符数。 */
@@ -207,6 +213,40 @@ function splitRecords(stdout, size) {
     const fields = tokens.slice(index, index + size)
     fields[0] = fields[0].replace(/^[\r\n]+/, '')
     records.push(fields)
+  }
+  return records
+}
+
+/**
+ * 解析状态列表的 git log 输出：每条记录以 \x01 开头、9 个 NUL 字段，
+ * 记录末尾是 --name-only 输出的修改文件列表（提交本身没有文件时为空白）。
+ * @param {string} stdout git 输出。
+ * @returns {Array<{ fields: string[], parents: string[], files: string[], filesTruncated: boolean }>} 解析结果。
+ */
+function parseCommitRecords(stdout) {
+  const records = []
+  for (const block of String(stdout).split(LOG_RECORD_SEP)) {
+    if (block === '') continue
+    const tokens = block.split(FIELD_SEP)
+    if (tokens.length < 9) continue
+    const fields = tokens.slice(0, 9)
+    if (!HASH.test(fields[0])) continue
+    const parents = []
+    for (const parent of fields[8].trim().split(' ')) {
+      if (HASH.test(parent)) parents.push(parent.toLowerCase())
+    }
+    const files = []
+    let filesTruncated = false
+    for (const line of (tokens[9] ?? '').split('\n')) {
+      const file = line.trim()
+      if (file === '') continue
+      if (files.length >= COMMIT_FILES_LIMIT) {
+        filesTruncated = true
+        break
+      }
+      files.push(file.length > COMMIT_FILE_PATH_LIMIT ? `${file.slice(0, COMMIT_FILE_PATH_LIMIT)}…` : file)
+    }
+    records.push({ fields, parents, files, filesTruncated })
   }
   return records
 }
@@ -799,6 +839,7 @@ async function readRepo(repo, root, limit, allBranches, signal, ctx) {
     'log',
     LOG_FORMAT,
     '--source',
+    '--name-only',
     '--date-order',
     '-n',
     String(limit),
@@ -858,6 +899,7 @@ async function readRepo(repo, root, limit, allBranches, signal, ctx) {
       'log',
       LOG_FORMAT,
       '--source',
+      '--name-only',
       '--date-order',
       '-n',
       String(limit + extra),
@@ -882,8 +924,8 @@ async function readRepo(repo, root, limit, allBranches, signal, ctx) {
 
   const commits = []
   if (effectiveLog.ok) {
-    for (const fields of splitRecords(effectiveLog.stdout, 9)) {
-      if (!HASH.test(fields[0])) continue
+    for (const record of parseCommitRecords(effectiveLog.stdout)) {
+      const { fields, parents, files } = record
       const hash = fields[0].toLowerCase()
       commits.push({
         repo: name,
@@ -895,7 +937,9 @@ async function readRepo(repo, root, limit, allBranches, signal, ctx) {
         refs: truncate(fields[5].trim(), FIELD_LIMIT),
         source: truncate(fields[6].trim(), FIELD_LIMIT),
         committerDate: fields[7].trim(),
-        parentCount: fields[8].trim() === '' ? 0 : fields[8].trim().split(' ').length,
+        parentCount: parents.length,
+        parents,
+        ...(files.length === 0 ? {} : { files }),
         remoteOnly: remoteOnly.has(hash),
       })
     }
