@@ -1824,6 +1824,11 @@ test('history bar keeps the search box on the right and the filter count beside 
   const filtered = findOne(right, (node) => node.props?.className === 'gm-meta gm-summary-filtered')
   assert.ok(filtered, 'shown count is inside the right cluster')
   assert.equal(right.children.filter(Boolean).at(-1).props.className, 'gm-search')
+  assert.equal(
+    findAll(renderer.tree, (node) => node.props?.className === 'gm-graph').length,
+    0,
+    'a single repository without parent data stays a flat list',
+  )
   renderer.unmount()
 })
 

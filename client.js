@@ -2969,8 +2969,11 @@ window.__ModuleLoader__.load({
         }
 
         // 单仓库时在行首渲染提交树；查询/时间筛选期间保留占位宽度但隐藏连线，避免行在输入时左右跳动。
+        // 旧版 Host 不返回 parents：此时不画树，避免出现只有节点没有连线的误导性画面。
+        const hasParentData =
+          Array.isArray(data?.commits) && data.commits.some((commit) => Array.isArray(commit.parents))
         let graphSequence = null
-        if (repos.length === 1) {
+        if (repos.length === 1 && hasParentData) {
           const remoteCommits = []
           const localCommits = []
           for (const commit of data?.commits ?? []) {
