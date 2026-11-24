@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. Versions follow [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed
+
+- Add to chat no longer renders a status line in the Git view after inserting a commit reference. Insertion succeeds or fails silently, so the commit list layout stays stable.
+
 ## 0.2.2 — 2026-11-17
 
 ### Added

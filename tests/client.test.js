@@ -1520,16 +1520,13 @@ test('zh and en dictionaries expose identical keys', () => {
     'changes.refreshHint',
     'chat.add',
     'chat.addHint',
-    'chat.added',
-    'chat.addFailed',
-    'chat.dismiss',
     'chat.menuHint',
     'chat.menuLabel',
   ]
   for (const key of required) assert.ok(zhKeys.includes(key), `missing i18n key: ${key}`)
 })
 
-test('commit context menu inserts the commit into the chat input and reports the result', async () => {
+test('commit context menu inserts the commit into the chat input without a layout notice', async () => {
   const requests = []
   const inserted = []
   const focusCalls = []
@@ -1586,24 +1583,24 @@ test('commit context menu inserts the commit into the chat input and reports the
   )
   assert.deepEqual(inserted, [`[commit:repo@${hash.slice(0, 8)}]\n`], 'only a compact commit marker is inserted')
   assert.deepEqual(focusCalls, ['focus'], 'focus returns to the commit row after closing the menu')
-  const notice = findOne(renderer.tree, (node) => node.props?.['data-gm-notice'] === 'ok')
-  assert.ok(notice, 'success should be visible')
-  assert.match(textContent(notice), /chat\.added/)
-  const dismiss = findOne(notice, (node) => node.props?.['aria-label'] === 'chat.dismiss')
-  assert.ok(dismiss, 'notice should be dismissible')
-  dismiss.props.onClick()
-  await renderer.flush()
-  assert.equal(findOne(renderer.tree, (node) => node.props?.['data-gm-notice'] !== undefined), undefined)
+  assert.equal(
+    findOne(renderer.tree, (node) => node.props?.['data-gm-notice'] !== undefined),
+    undefined,
+    'no notice line is added to the layout',
+  )
+  assert.equal(findOne(renderer.tree, (node) => node.props?.role === 'status'), undefined)
 
-  // 输入框正忙时 insertText 返回 false：不插入，但要显示可见失败提示。
+  // 输入框正忙时 insertText 返回 false：静默失败，不插入也不显示提示。
   inputActions.insertText = () => false
   const retry = await openMenu()
   retry.props.onClick()
   await renderer.flush()
   assert.equal(inserted.length, 1)
-  const failure = findOne(renderer.tree, (node) => node.props?.['data-gm-notice'] === 'error')
-  assert.ok(failure, 'failure should not be silent')
-  assert.match(textContent(failure), /chat\.addFailed/)
+  assert.equal(
+    findOne(renderer.tree, (node) => node.props?.['data-gm-notice'] !== undefined),
+    undefined,
+    'failures stay silent too',
+  )
   renderer.unmount()
 })
 

@@ -79,9 +79,6 @@ window.__ModuleLoader__.load({
       'chat.addHint': '把该提交的引用插入对话输入框，再输入你的问题',
       'chat.menuLabel': '提交操作',
       'chat.menuHint': '右键添加到对话',
-      'chat.added': '已添加到对话',
-      'chat.addFailed': '添加到对话失败，请重试',
-      'chat.dismiss': '关闭提示',
       'upstream.ahead': '领先远程 {count} 个提交（本地未推送）',
       'upstream.behind': '落后远程 {count} 个提交（需要拉取）',
       'branch.current': '当前分支',
@@ -230,9 +227,6 @@ window.__ModuleLoader__.load({
       'chat.addHint': 'Insert a reference to this commit into the chat input, then write your question',
       'chat.menuLabel': 'Commit actions',
       'chat.menuHint': 'Right-click to add to chat',
-      'chat.added': 'Added to chat',
-      'chat.addFailed': 'Could not add to chat; please try again',
-      'chat.dismiss': 'Dismiss',
       'upstream.ahead': '{count} commits ahead of upstream (not pushed)',
       'upstream.behind': '{count} commits behind upstream (needs fetch)',
       'branch.current': 'Current branch',
@@ -1420,7 +1414,6 @@ window.__ModuleLoader__.load({
         const [fetching, setFetching] = useState(false)
         const [fetchReport, setFetchReport] = useState(null)
         const [chatMenu, setChatMenu] = useState(null)
-        const [chatNotice, setChatNotice] = useState(null)
         const [state, setState] = useState({ status: 'idle', data: null, failure: null, key: '' })
         const [confirmingFetch, setConfirmingFetch] = useState(false)
         const [fetchDetailsOpen, setFetchDetailsOpen] = useState(false)
@@ -1449,8 +1442,6 @@ window.__ModuleLoader__.load({
         workspaceKeyRef.current = cwd
         /** 打开菜单的提交行元素；菜单关闭后把键盘焦点还给它。 */
         const menuTriggerRef = useRef(null)
-        /** 提示自动消失的定时器。 */
-        const noticeTimerRef = useRef(null)
         /** 当前工作区已加载的仓库名集合，用于校验提交是否属于当前 workspace。 */
         const knownRepoNamesRef = useRef(new Set())
         {
@@ -1485,23 +1476,12 @@ window.__ModuleLoader__.load({
         /** 关闭提交操作菜单；焦点由下面的 effect 还给触发它的提交行。 */
         const closeChatMenu = useCallback(() => setChatMenu(null), [])
 
-        /** 显示一条会自动消失的状态提示，并在下一次提示时重置计时。 */
-        const showChatNotice = useCallback((kind, message) => {
-          setChatNotice({ kind, message })
-          if (noticeTimerRef.current !== null) clearTimeout(noticeTimerRef.current)
-          noticeTimerRef.current = setTimeout(() => {
-            noticeTimerRef.current = null
-            setChatNotice(null)
-          }, 4000)
-        }, [])
-
         useEffect(
           () => () => {
             fetchAbortRef.current?.abort()
             changesAbortRef.current?.abort()
             for (const controller of detailAbortsRef.current.values()) controller.abort()
             detailAbortsRef.current.clear()
-            if (noticeTimerRef.current !== null) clearTimeout(noticeTimerRef.current)
           },
           [],
         )
@@ -1628,14 +1608,9 @@ window.__ModuleLoader__.load({
           setOpenDiffError(null)
           setCollapsedChangeRepos([])
           setChangesState({ status: 'idle', data: null, failure: null, key: '' })
-          // 菜单与提示都属于旧工作区，切换 cwd 后不能继续操作旧的提交。
+          // 菜单属于旧工作区，切换 cwd 后不能继续操作旧的提交。
           setChatMenu(null)
-          setChatNotice(null)
           menuTriggerRef.current = null
-          if (noticeTimerRef.current !== null) {
-            clearTimeout(noticeTimerRef.current)
-            noticeTimerRef.current = null
-          }
         }, [cwd])
 
         // Search and time filters belong to a workspace, so do not carry them into a new cwd.
@@ -2338,32 +2313,11 @@ window.__ModuleLoader__.load({
                       onClick: () => {
                         const commit = chatMenu.commit
                         closeChatMenu()
-                        const inserted = attachToChat(commit)
-                        showChatNotice(inserted ? 'ok' : 'error', t(inserted ? 'chat.added' : 'chat.addFailed'))
+                        attachToChat(commit)
                       },
                     },
                     t('chat.add'),
                   ),
-                ),
-              )
-
-        // 插入成功/失败都用可关闭、会自动消失的提示反馈，不再静默失败。
-        const chatNoticeBanner =
-          chatNotice === null
-            ? null
-            : h(
-                'div',
-                { className: 'gm-confirm', role: 'status', 'aria-live': 'polite', 'data-gm-notice': chatNotice.kind },
-                h('span', { className: 'gm-confirm-text' }, chatNotice.message),
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'gm-tool',
-                    'aria-label': t('chat.dismiss'),
-                    onClick: () => setChatNotice(null),
-                  },
-                  t('chat.dismiss'),
                 ),
               )
 
@@ -3179,7 +3133,6 @@ window.__ModuleLoader__.load({
           toolbar,
           fetchConfirmDialog,
           chatMenuLayer,
-          chatNoticeBanner,
           diffErrorBanner,
           fetchToast,
           h(
