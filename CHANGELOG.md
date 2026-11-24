@@ -8,6 +8,7 @@ All notable changes to this project are documented here. Versions follow [Semant
 
 - **Commit graph in single-repository workspaces.** When the workspace contains exactly one repository, the history view draws a lane graph for branches, merges and separate lines of work. It works on the loaded commit window and steps aside only while a search or date filter is applied, keeping its gutter so rows do not jump.
 - **Changed-file search.** The commit filter now also matches the names of files changed by each commit (up to 24 files per commit, carried with the loaded window).
+- **Paged history.** Scrolling to the bottom of the commit list (or using **Load more**) loads older commits, up to 500 per repository; a footer reports when everything is loaded, so the commit graph is no longer limited to the first 40 commits.
 
 ### Changed
 

@@ -24,6 +24,7 @@ This is a third-party plugin for DeepSeek Harness (DSH), not an official DeepSee
 - Expand a commit to read its message and changed files, then click a file to open the diff.
 - In a single-repository workspace the history renders a commit graph, so branches, merges and separate lines of work are visible at a glance.
 - Filter by repository, date, commit message, author, short hash, or changed file name.
+- Scroll to the bottom of the history (or use **Load more**) to page through older commits; each repository can load up to 500 commits, and the commit graph extends as more arrive.
 - Check for uncommitted work and ahead/behind counts, and fetch updates for several repositories at once.
 - **Ask the AI about a commit.** Right-click a commit row and choose **Add to chat**; a short reference goes into the chat input. Add your question and send, and the agent can read the commit and its diff using the plugin's read-only tools.
 

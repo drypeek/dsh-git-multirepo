@@ -37,6 +37,10 @@ window.__ModuleLoader__.load({
     const DIFF_KIND = 'git-diff'
     /** 每个仓库默认取的提交条数。 */
     const DEFAULT_LIMIT = 40
+    /** 客户端最多请求的每仓库提交条数（Host 上限 500）。 */
+    const MAX_CLIENT_LIMIT = 500
+    /** 每次“加载更多”增加的每仓库提交条数。 */
+    const LOAD_MORE_STEP = 80
     /** 仓库配色，按仓库出现顺序循环分配。 */
     const PALETTE = [
       '#5b8ff9', '#5ad8a6', '#f6bd16', '#e8684a', '#6dc8ec', '#9270ca',
@@ -96,7 +100,11 @@ window.__ModuleLoader__.load({
       'state.noWorkspace': '当前会话还没有工作目录。',
       'state.error': '读取失败：{message}',
       'state.noMatch': '没有匹配的提交。',
-      'filter.placeholder': '筛选提交信息 / 作者 / 仓库 / 哈希 / 文件名',      'summary.repos': '{count} 个仓库',
+      'filter.placeholder': '筛选提交信息 / 作者 / 仓库 / 哈希 / 文件名',
+      'list.loadMore': '加载更多提交',
+      'list.loadingMore': '正在加载更多…',
+      'list.allLoaded': '已加载全部提交',
+      'summary.repos': '{count} 个仓库',
       'summary.commits': '{count} 条提交',
       'summary.dirty': '{count} 个有未提交改动',
       'summary.clean': '全部干净',
@@ -244,6 +252,9 @@ window.__ModuleLoader__.load({
       'state.error': 'Read failed: {message}',
       'state.noMatch': 'No commit matches this filter.',
       'filter.placeholder': 'Filter message, author, repository, hash or file name',
+      'list.loadMore': 'Load more commits',
+      'list.loadingMore': 'Loading more…',
+      'list.allLoaded': 'All commits loaded',
       'summary.repos': '{count} repos',
       'summary.commits': '{count} commits',
       'summary.dirty': '{count} with uncommitted changes',
@@ -506,6 +517,10 @@ window.__ModuleLoader__.load({
 .gm-confirm-error .gm-confirm-text{color:var(--dsw-alias-state-error-primary)}
 .gm-retry{margin-left:10px;font:inherit;font-size:11px;padding:1px 8px;border-radius:3px;border:.5px solid var(--dsw-alias-border-l1);background:0 0;color:var(--dsw-alias-brand-primary);cursor:pointer}
 .gm-retry:hover{border-color:var(--dsw-alias-brand-primary)}
+.gm-load-more{display:flex;justify-content:center;padding:12px 20px 20px;font-size:12px;color:var(--dsw-alias-label-secondary)}
+.gm-load-more-btn{font:inherit;font-size:12px;padding:4px 16px;border-radius:4px;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-brand-primary);cursor:pointer}
+.gm-load-more-btn:hover{border-color:var(--dsw-alias-brand-primary)}
+.gm-load-more-btn:disabled{cursor:default;opacity:.6}
 .gm-mode{flex:none;display:inline-flex;border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-sm,4px);overflow:hidden;background:var(--dsw-alias-bg-layer-1)}
 .gm-mode-btn{border:0;background:0 0;font:inherit;font-size:12px;color:var(--dsw-alias-label-secondary);padding:4px 11px;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;gap:5px;transition:background .12s ease,color .12s ease}
 .gm-mode-btn+.gm-mode-btn{border-left:.5px solid var(--dsw-alias-border-l1)}
@@ -1511,6 +1526,9 @@ window.__ModuleLoader__.load({
 
         const [allBranches, setAllBranches] = useState(false)
         const [reloadToken, setReloadToken] = useState(0)
+        // 每个仓库的提交加载上限；“加载更多”逐步扩大它。
+        const [limit, setLimit] = useState(DEFAULT_LIMIT)
+        const [noMoreCommits, setNoMoreCommits] = useState(false)
         const [query, setQuery] = useState('')
         const [hiddenRepos, setHiddenRepos] = useState([])
         const [timeRange, setTimeRange] = useState('all')
@@ -1536,6 +1554,9 @@ window.__ModuleLoader__.load({
         const fetchAbortRef = useRef(null)
         const changesAbortRef = useRef(null)
         const detailAbortsRef = useRef(new Map())
+        // 加载更多期间记录上一次已加载的提交数，用来判断是否已经到底。
+        const previousTotalRef = useRef(0)
+        const pendingLoadMoreRef = useRef(false)
         // 等待展开详情的提交键；数据就绪后在原行下方一次性展开，不做滚动重定位。
         const pendingExpandRef = useRef(null)
         const rootRef = useRef(null)
@@ -1706,6 +1727,10 @@ window.__ModuleLoader__.load({
           detailAbortsRef.current.clear()
           setFetching(false)
           setHiddenRepos([])
+          setLimit(DEFAULT_LIMIT)
+          setNoMoreCommits(false)
+          previousTotalRef.current = 0
+          pendingLoadMoreRef.current = false
           setExpandedKey(null)
           pendingExpandRef.current = null
           setPendingExpandKey(null)
@@ -1769,7 +1794,7 @@ window.__ModuleLoader__.load({
           })
           const params = new URLSearchParams({
             root: cwd,
-            limit: String(DEFAULT_LIMIT),
+            limit: String(limit),
             all: allBranches ? '1' : '0',
           })
           fetch(`${STATE_URL}?${params.toString()}`, { signal: controller.signal })
@@ -1779,11 +1804,17 @@ window.__ModuleLoader__.load({
             })
             .then((value) => {
               if (controller.signal.aborted || viewKeyRef.current !== slotKey) return
+              if (pendingLoadMoreRef.current) {
+                pendingLoadMoreRef.current = false
+                if (value.total <= previousTotalRef.current) setNoMoreCommits(true)
+              }
+              previousTotalRef.current = value.total
               remember(stateCache, slotKey, value, STATE_CACHE_LIMIT)
               setState({ status: 'ready', data: value, failure: null, key: slotKey })
             })
             .catch((error) => {
               if (controller.signal.aborted || viewKeyRef.current !== slotKey) return
+              pendingLoadMoreRef.current = false
               setState({
                 status: 'error',
                 data: null,
@@ -1792,7 +1823,7 @@ window.__ModuleLoader__.load({
               })
             })
           return () => controller.abort()
-        }, [cwd, allBranches, reloadToken])
+        }, [cwd, allBranches, reloadToken, limit])
 
         // 工作区改动只在「改动」模式下请求：切模式或切 cwd 时 abort，并先用缓存渲染。
         useEffect(() => {
@@ -2039,6 +2070,34 @@ window.__ModuleLoader__.load({
             previous.includes(name) ? previous.filter((value) => value !== name) : [...previous, name],
           )
         }, [])
+
+        /** 是否还有更多提交可以加载：按当前每仓库上限判断，加载后没有增长就标记到底。 */
+        const canLoadMore =
+          data !== null && !noMoreCommits && limit < MAX_CLIENT_LIMIT && (data.total ?? 0) >= limit
+        const loadMore = useCallback(() => {
+          if (state.status === 'loading') return
+          if (limit >= MAX_CLIENT_LIMIT) {
+            setNoMoreCommits(true)
+            return
+          }
+          pendingLoadMoreRef.current = true
+          setLimit((value) => Math.min(value + LOAD_MORE_STEP, MAX_CLIENT_LIMIT))
+        }, [limit, state.status])
+
+        /** 滚动接近底部时自动加载更多；留 120px 提前量。 */
+        const handleListScroll = useCallback(
+          (event) => {
+            if (!canLoadMore || state.status === 'loading') return
+            const node = event?.currentTarget
+            if (node === null || node === undefined) return
+            const top = Number(node.scrollTop)
+            const height = Number(node.clientHeight)
+            const total = Number(node.scrollHeight)
+            if (!Number.isFinite(top) || !Number.isFinite(height) || !Number.isFinite(total)) return
+            if (top + height >= total - 120) loadMore()
+          },
+          [canLoadMore, loadMore, state.status],
+        )
 
         const loadDetail = useCallback(
           (key, commit, force = false) => {
@@ -3160,6 +3219,28 @@ window.__ModuleLoader__.load({
           if (!collapsedLocal) for (const commit of visible.local) pushRow(commit)
         }
 
+        if (items.length > 0 && (canLoadMore || noMoreCommits)) {
+          items.push(
+            h(
+              'div',
+              { className: 'gm-load-more', key: 'load-more' },
+              noMoreCommits
+                ? t('list.allLoaded')
+                : h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'gm-load-more-btn',
+                      'data-gm-load-more': 'true',
+                      disabled: loading,
+                      onClick: loadMore,
+                    },
+                    loading ? t('list.loadingMore') : t('list.loadMore'),
+                  ),
+            ),
+          )
+        }
+
         const chips =
           repos.length === 0
             ? null
@@ -3232,7 +3313,7 @@ window.__ModuleLoader__.load({
         } else if (items.length === 0) {
           body = h('div', { className: 'gm-status', 'data-gm-state': 'no-match' }, t('state.noMatch'))
         } else {
-          body = h('div', { className: 'gm-list', 'data-gm-count': items.length, ref: listRef }, items)
+          body = h('div', { className: 'gm-list', 'data-gm-count': items.length, ref: listRef, onScroll: handleListScroll }, items)
         }
 
         const unknownStatusCount = repos.filter(

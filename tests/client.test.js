@@ -1921,3 +1921,49 @@ test('multi-repository history stays a flat list without a graph gutter', async 
   assert.equal(findAll(renderer.tree, (node) => typeof node.props?.className === 'string' && node.props.className.includes('gm-row-graph')).length, 0)
   renderer.unmount()
 })
+
+test('commit history loads more on scroll and reports when everything is loaded', async () => {
+  const requests = []
+  const client = loadClient(requestFetch(requests))
+  const renderer = new HookRenderer(client.view, null)
+  renderer.cwd = 'C:/load-more-workspace'
+  renderer.props = viewProps(renderer)
+  renderer.render()
+  const root = renderer.cwd
+  const repos = [{ name: 'repo', path: `${root}/repo`, branch: 'main', dirty: false, upstream: null, error: null }]
+  const hash = 'f'.repeat(40)
+  const initial = stateFor(root, repos, [commitValue('repo', hash, 'FIRST PAGE', [])])
+  initial.total = 40
+  deferredRequest(requests, 'state', root).resolve(initial)
+  await renderer.flush()
+
+  const list = findOne(renderer.tree, (node) => node.props?.className === 'gm-list')
+  assert.equal(typeof list.props.onScroll, 'function')
+  assert.ok(findOne(renderer.tree, (node) => node.props?.['data-gm-load-more'] === 'true'))
+
+  list.props.onScroll({ currentTarget: { scrollTop: 760, clientHeight: 320, scrollHeight: 1100 } })
+  await renderer.flush()
+  const firstMore = requests.find((entry) => entry.kind === 'state' && !entry.settled)
+  assert.ok(firstMore, 'scrolling to the bottom requests the next page')
+  assert.equal(firstMore.url.searchParams.get('limit'), '120')
+
+  const page = stateFor(root, repos, [commitValue('repo', hash, 'FIRST PAGE', [])])
+  page.total = 120
+  firstMore.resolve(page)
+  await renderer.flush()
+  const button = findOne(renderer.tree, (node) => node.props?.['data-gm-load-more'] === 'true')
+  assert.ok(button, 'the next page has another page available')
+  button.props.onClick()
+  await renderer.flush()
+  const secondMore = requests.find((entry) => entry.kind === 'state' && !entry.settled)
+  assert.ok(secondMore)
+  assert.equal(secondMore.url.searchParams.get('limit'), '200')
+
+  const final = stateFor(root, repos, [commitValue('repo', hash, 'FIRST PAGE', [])])
+  final.total = 120
+  secondMore.resolve(final)
+  await renderer.flush()
+  const done = findOne(renderer.tree, (node) => node.props?.className === 'gm-load-more')
+  assert.match(textContent(done), /list\.allLoaded/, 'a page without growth marks the end')
+  renderer.unmount()
+})
