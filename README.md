@@ -22,7 +22,8 @@ This is a third-party plugin for DeepSeek Harness (DSH), not an official DeepSee
 - Browse the current branch or all branches. In current-branch mode, incoming remote commits get their own section.
 - Open **Working tree changes** to see staged, unstaged, untracked and conflicted files from every repository, grouped by repository. Click a file to view its diff in the right sidebar.
 - Expand a commit to read its message and changed files, then click a file to open the diff.
-- Filter by repository, date, commit message, author, or short hash.
+- In a single-repository workspace the history renders a commit graph, so branches, merges and separate lines of work are visible at a glance.
+- Filter by repository, date, commit message, author, short hash, or changed file name.
 - Check for uncommitted work and ahead/behind counts, and fetch updates for several repositories at once.
 - **Ask the AI about a commit.** Right-click a commit row and choose **Add to chat**; a short reference goes into the chat input. Add your question and send, and the agent can read the commit and its diff using the plugin's read-only tools.
 
@@ -94,6 +95,7 @@ The list starts with the latest 40 commits per repository and has total count an
 - Untracked directories are collapsed into one row instead of being expanded.
 - Conflicted files are listed but not rendered (no combined diff yet).
 - Untracked file previews are limited to 512 KB; binary files and symbolic links show status only.
+- Commit file-name search covers the loaded commit window and keeps at most 24 changed file names per commit.
 
 ### Why can't a linked worktree be read?
 

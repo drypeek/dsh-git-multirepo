@@ -1759,3 +1759,160 @@ test('reopening a cancelled commit detail starts a fresh request', async () => {
   assert.match(textContent(renderer.tree), /RESTARTED DETAIL/)
   renderer.unmount()
 })
+
+function commitValue(repo, hash, subject, parents = []) {
+  return {
+    repo,
+    hash,
+    short: hash.slice(0, 8),
+    author: 'Tester',
+    date: '2026-01-01T00:00:00Z',
+    subject,
+    refs: '',
+    source: '',
+    committerDate: '2026-01-01T00:00:00Z',
+    parentCount: parents.length,
+    parents,
+    remoteOnly: false,
+  }
+}
+
+function stateFor(root, repos, commits) {
+  return {
+    root,
+    scannedAt: new Date().toISOString(),
+    repos,
+    commits,
+    total: commits.length,
+    truncated: false,
+    reposTruncated: false,
+    reposSkipped: 0,
+  }
+}
+
+function searchInput(tree) {
+  return findOne(tree, (node) => node.props?.type === 'search')
+}
+
+test('history bar keeps the search box on the right and the filter count beside it', async () => {
+  const requests = []
+  const client = loadClient(requestFetch(requests))
+  const renderer = new HookRenderer(client.view, null)
+  renderer.cwd = 'C:/layout-workspace'
+  renderer.props = viewProps(renderer)
+  renderer.render()
+  deferredRequest(requests, 'state', renderer.cwd).resolve(stateValue(renderer.cwd, 'LAYOUT SUBJECT', '1'.repeat(40)))
+  await renderer.flush()
+
+  const bar = findOne(renderer.tree, (node) => node.props?.className === 'gm-bar')
+  assert.ok(bar)
+  const barChildren = bar.children.filter(Boolean)
+  assert.equal(barChildren.at(-1).props.className, 'gm-bar-right', 'the search cluster is the last bar item')
+  const summary = findOne(barChildren[0], (node) => node.props?.className === 'gm-meta gm-summary')
+  const before = textContent(summary)
+  const search = searchInput(barChildren.at(-1))
+  assert.ok(search, 'search input lives in the right cluster')
+  assert.equal(barChildren.at(-1).children.filter(Boolean).at(-1).props.className, 'gm-search')
+
+  search.props.onChange({ currentTarget: { value: 'LAYOUT' } })
+  await renderer.flush()
+  const nextBar = findOne(renderer.tree, (node) => node.props?.className === 'gm-bar')
+  const nextLeft = findOne(nextBar.children[0], (node) => node.props?.className === 'gm-meta gm-summary')
+  assert.equal(textContent(nextLeft), before, 'query typing must not change the left summary text')
+  const right = nextBar.children.filter(Boolean).at(-1)
+  assert.equal(right.props.className, 'gm-bar-right')
+  const filtered = findOne(right, (node) => node.props?.className === 'gm-meta gm-summary-filtered')
+  assert.ok(filtered, 'shown count is inside the right cluster')
+  assert.equal(right.children.filter(Boolean).at(-1).props.className, 'gm-search')
+  renderer.unmount()
+})
+
+test('commit search also matches changed file names', async () => {
+  const requests = []
+  const client = loadClient(requestFetch(requests))
+  const renderer = new HookRenderer(client.view, null)
+  renderer.cwd = 'C:/file-search-workspace'
+  renderer.props = viewProps(renderer)
+  renderer.render()
+  const value = stateValue(renderer.cwd, 'FILE SUBJECT', '2'.repeat(40))
+  value.commits[0].files = ['src/unique-file-name.ts']
+  deferredRequest(requests, 'state', renderer.cwd).resolve(value)
+  await renderer.flush()
+
+  const input = searchInput(renderer.tree)
+  input.props.onChange({ currentTarget: { value: 'unique-file-name' } })
+  await renderer.flush()
+  assert.match(textContent(renderer.tree), /FILE SUBJECT/, 'a changed file name keeps the commit visible')
+
+  input.props.onChange({ currentTarget: { value: 'no-such-file-name' } })
+  await renderer.flush()
+  assert.doesNotMatch(textContent(renderer.tree), /FILE SUBJECT/, 'non-matching file queries filter the commit out')
+  renderer.unmount()
+})
+
+test('single-repository history renders a commit graph and keeps its gutter while filtering', async () => {
+  const requests = []
+  const client = loadClient(requestFetch(requests))
+  const renderer = new HookRenderer(client.view, null)
+  renderer.cwd = 'C:/graph-workspace'
+  renderer.props = viewProps(renderer)
+  renderer.render()
+  const root = renderer.cwd
+  const [hashA, hashB, hashC] = ['a'.repeat(40), 'b'.repeat(40), 'c'.repeat(40)]
+  deferredRequest(requests, 'state', root).resolve(
+    stateFor(
+      root,
+      [{ name: 'repo', path: `${root}/repo`, branch: 'main', dirty: false, upstream: null, error: null }],
+      [
+        commitValue('repo', hashA, 'GRAPH A', [hashB]),
+        commitValue('repo', hashB, 'GRAPH B', [hashC]),
+        commitValue('repo', hashC, 'GRAPH C', []),
+      ],
+    ),
+  )
+  await renderer.flush()
+
+  assert.equal(findAll(renderer.tree, (node) => node.props?.className === 'gm-graph').length, 3)
+  const graphRows = findAll(renderer.tree, (node) => typeof node.props?.className === 'string' && node.props.className.includes('gm-row-graph'))
+  assert.equal(graphRows.length, 3)
+  assert.equal(findAll(renderer.tree, (node) => node.type === 'svg' && node.props?.['aria-hidden'] === 'true').length, 3)
+
+  const input = searchInput(renderer.tree)
+  input.props.onChange({ currentTarget: { value: 'GRAPH A' } })
+  await renderer.flush()
+  const gutter = findAll(renderer.tree, (node) => node.props?.className === 'gm-graph')
+  assert.equal(gutter.length, 1, 'filtered row keeps the graph gutter')
+  assert.equal(findAll(gutter[0], (node) => node.type === 'svg').length, 0, 'graph lines are hidden while filtering')
+
+  input.props.onChange({ currentTarget: { value: '' } })
+  await renderer.flush()
+  assert.equal(findAll(renderer.tree, (node) => node.props?.className === 'gm-graph').length, 3)
+  renderer.unmount()
+})
+
+test('multi-repository history stays a flat list without a graph gutter', async () => {
+  const requests = []
+  const client = loadClient(requestFetch(requests))
+  const renderer = new HookRenderer(client.view, null)
+  renderer.cwd = 'C:/multi-workspace'
+  renderer.props = viewProps(renderer)
+  renderer.render()
+  const root = renderer.cwd
+  deferredRequest(requests, 'state', root).resolve(
+    stateFor(
+      root,
+      [
+        { name: 'one', path: `${root}/one`, branch: 'main', dirty: false, upstream: null, error: null },
+        { name: 'two', path: `${root}/two`, branch: 'main', dirty: false, upstream: null, error: null },
+      ],
+      [
+        commitValue('one', 'd'.repeat(40), 'ONE SUBJECT', []),
+        commitValue('two', 'e'.repeat(40), 'TWO SUBJECT', []),
+      ],
+    ),
+  )
+  await renderer.flush()
+  assert.equal(findAll(renderer.tree, (node) => node.props?.className === 'gm-graph').length, 0)
+  assert.equal(findAll(renderer.tree, (node) => typeof node.props?.className === 'string' && node.props.className.includes('gm-row-graph')).length, 0)
+  renderer.unmount()
+})

@@ -4,8 +4,14 @@ All notable changes to this project are documented here. Versions follow [Semant
 
 ## Unreleased
 
+### Added
+
+- **Commit graph in single-repository workspaces.** When the workspace contains exactly one repository, the history view draws a lane graph for branches, merges and separate lines of work. It works on the loaded commit window and steps aside only while a search or date filter is applied, keeping its gutter so rows do not jump.
+- **Changed-file search.** The commit filter now also matches the names of files changed by each commit (up to 24 files per commit, carried with the loaded window).
+
 ### Changed
 
+- The search box is pinned to the right edge of the history and working-tree bars, and the “shown” count sits just to its left. Typing a query no longer inserts text into the left summary, so the left side of the bar stays still.
 - Add to chat no longer renders a status line in the Git view after inserting a commit reference. Insertion succeeds or fails silently, so the commit list layout stays stable.
 
 ## 0.2.2 — 2026-11-17

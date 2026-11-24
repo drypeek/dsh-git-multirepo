@@ -43,6 +43,12 @@ window.__ModuleLoader__.load({
       '#ff9d4d', '#269a99', '#ff99c3', '#5d7092', '#bd8fe8', '#4e9b5f',
       '#c15c5c', '#3a9bd9', '#b8a04a', '#8f6bc4',
     ]
+    /** 提交树每列泳道的宽度（px）。 */
+    const GRAPH_LANE_WIDTH = 12
+    /** 提交树行高（px）；需与 .gm-row-graph 的高度一致，保证跨行连线连续。 */
+    const GRAPH_ROW_HEIGHT = 42
+    /** 提交树最多渲染的泳道数，避免极端分支数挤压提交信息。 */
+    const GRAPH_MAX_LANES = 14
     /** 确认拉取后的免确认窗口（毫秒）；fetch 只更新远程引用，不值得每次都打断。 */
     const FETCH_CONFIRM_TTL_MS = 10 * 60 * 1000
     /** 成功结果横幅的自动消失时间（毫秒）；失败结果保留到用户关闭或下一次拉取。 */
@@ -90,8 +96,7 @@ window.__ModuleLoader__.load({
       'state.noWorkspace': '当前会话还没有工作目录。',
       'state.error': '读取失败：{message}',
       'state.noMatch': '没有匹配的提交。',
-      'filter.placeholder': '筛选提交信息 / 作者 / 仓库 / 哈希',
-      'summary.repos': '{count} 个仓库',
+      'filter.placeholder': '筛选提交信息 / 作者 / 仓库 / 哈希 / 文件名',      'summary.repos': '{count} 个仓库',
       'summary.commits': '{count} 条提交',
       'summary.dirty': '{count} 个有未提交改动',
       'summary.clean': '全部干净',
@@ -238,7 +243,7 @@ window.__ModuleLoader__.load({
       'state.noWorkspace': 'This session has no working directory.',
       'state.error': 'Read failed: {message}',
       'state.noMatch': 'No commit matches this filter.',
-      'filter.placeholder': 'Filter message, author, repository or hash',
+      'filter.placeholder': 'Filter message, author, repository, hash or file name',
       'summary.repos': '{count} repos',
       'summary.commits': '{count} commits',
       'summary.dirty': '{count} with uncommitted changes',
@@ -369,10 +374,11 @@ window.__ModuleLoader__.load({
 .gm-tool[aria-busy=true]{color:var(--dsw-alias-brand-primary)}
 .gm-tool svg{width:15px;height:15px;display:block;flex:none}
 .gm-bar{flex:none;display:flex;align-items:center;gap:14px;padding:8px 20px;flex-wrap:wrap;border-bottom:.5px solid var(--dsw-alias-border-l1)}
+.gm-bar-right{margin-left:auto;display:flex;align-items:center;gap:10px;flex:none}
 .gm-meta{flex:none;display:flex;align-items:center;gap:14px;color:var(--dsw-alias-label-secondary);font-size:12px}
 .gm-meta-warn{color:var(--dsw-alias-state-warn-primary)}
 .gm-meta-ok{color:var(--dsw-alias-state-success-primary)}
-.gm-search{flex:auto;min-width:180px;max-width:460px}
+.gm-search{flex:none;width:320px;max-width:45vw;min-width:160px}
 .gm-search input{width:100%;box-sizing:border-box;font:inherit;font-size:12px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-sm,4px);padding:5px 9px;outline:none}
 .gm-search input:focus{border-color:var(--dsw-alias-brand-primary)}
 .gm-search input::placeholder{color:var(--dsw-alias-label-secondary);opacity:.7}
@@ -442,6 +448,8 @@ window.__ModuleLoader__.load({
 .gm-divider::before,.gm-divider::after{content:'';flex:auto;height:1px;background:currentColor;opacity:.3}
 .gm-row:focus-visible{box-shadow:inset 0 0 0 2px var(--dsw-alias-brand-primary)}
 .gm-row-open{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.16))}
+.gm-row-graph{height:42px;padding-top:0;padding-bottom:0;align-items:center}
+.gm-graph{flex:none;height:42px;display:flex;align-items:center;overflow:hidden}
 .gm-rail{flex:none;width:3px;border-radius:2px;align-self:stretch;margin:3px 0}
 .gm-main{flex:auto;min-width:0;display:flex;flex-direction:column;gap:1px}
 .gm-line1{display:flex;align-items:baseline;gap:8px;min-width:0}
@@ -544,7 +552,7 @@ window.__ModuleLoader__.load({
 .gm-wt-error .gm-wt-name{color:var(--dsw-alias-state-error-primary)}
 .gm-wt-error-msg{padding:4px 12px 6px;font-size:11px;color:var(--dsw-alias-state-error-primary);word-break:break-word}
 .gm-wt-note{padding:4px 12px 6px;font-size:11px;color:var(--dsw-alias-state-warn-primary)}
-.gm-summary-filtered{color:var(--dsw-alias-label-secondary)}
+.gm-summary-filtered{min-width:76px;text-align:right;white-space:nowrap;color:var(--dsw-alias-label-secondary)}
 /* The Git log tab is a full-surface inspection view: while it is mounted the
    conversation composer is hidden so the timeline can use the whole height. The
    style tag lives inside this view, so it disappears when the user switches back
@@ -1039,6 +1047,107 @@ window.__ModuleLoader__.load({
         .split(',')
         .map((item) => item.trim())
         .some((item) => item === 'HEAD' || item.startsWith('HEAD -> '))
+    }
+
+    /**
+     * 为按时间倒序排列的提交计算提交树泳道。
+     * 每个提交记录它所在泳道、行前/行后的泳道状态与父提交，渲染层据此画连线。
+     * @param {Array<{ hash?: string, parents?: string[] }>} commits 提交序列（新→旧）。
+     * @returns {{ rows: Array<{ lane: number, before: Array<string|null>, after: Array<string|null>, parents: string[] }>, maxLanes: number }}
+     */
+    function computeCommitGraph(commits) {
+      const rows = []
+      const lanes = []
+      let maxLanes = 1
+      for (const commit of commits) {
+        const hash = typeof commit?.hash === 'string' ? commit.hash.toLowerCase() : ''
+        if (hash === '') continue
+        let lane = lanes.indexOf(hash)
+        if (lane === -1) {
+          lane = lanes.indexOf(null)
+          if (lane === -1) {
+            lane = lanes.length
+            lanes.push(null)
+          }
+        } else {
+          // 多个分支等待同一个提交时合并成一条泳道。
+          for (let index = lane + 1; index < lanes.length; index += 1) {
+            if (lanes[index] === hash) lanes[index] = null
+          }
+        }
+        const before = lanes.slice()
+        const parents = Array.isArray(commit.parents)
+          ? commit.parents.filter((parent) => typeof parent === 'string' && /^[0-9a-f]{4,64}$/i.test(parent)).map((parent) => parent.toLowerCase())
+          : []
+        lanes[lane] = parents.length > 0 ? parents[0] : null
+        for (const parent of parents.slice(1)) {
+          if (lanes.includes(parent)) continue
+          const free = lanes.indexOf(null)
+          if (free === -1) lanes.push(parent)
+          else lanes[free] = parent
+        }
+        while (lanes.length > 0 && lanes[lanes.length - 1] === null) lanes.pop()
+        maxLanes = Math.max(maxLanes, before.length, lanes.length, lane + 1)
+        rows.push({ lane, before, after: lanes.slice(), parents })
+      }
+      return { rows, maxLanes }
+    }
+
+    /**
+     * 渲染一行提交树：泳道竖线、提交节点与合并连线。
+     * @param {{ lane: number, before: Array<string|null>, after: Array<string|null>, parents: string[] }} row 行布局。
+     * @param {number} width SVG 宽度（px）。
+     * @param {number} laneCount 参与绘制的泳道数。
+     */
+    function renderCommitGraph(row, width, laneCount) {
+      const height = GRAPH_ROW_HEIGHT
+      const centerY = height / 2
+      const laneX = (index) => index * GRAPH_LANE_WIDTH + GRAPH_LANE_WIDTH / 2
+      const colorOf = (index) => PALETTE[index % PALETTE.length]
+      const nodes = []
+      const count = Math.max(Math.min(laneCount, GRAPH_MAX_LANES), row.lane + 1)
+      for (let index = 0; index < count; index += 1) {
+        const hasBefore = row.before[index] !== undefined && row.before[index] !== null
+        const hasAfter = row.after[index] !== undefined && row.after[index] !== null
+        const x = laneX(index)
+        const color = colorOf(index)
+        if (index === row.lane) {
+          if (hasBefore) {
+            nodes.push(h('path', { key: `in${index}`, d: `M ${x} 0 L ${x} ${centerY}`, stroke: color, strokeWidth: 2, fill: 'none' }))
+          }
+          nodes.push(
+            h('circle', { key: `node${index}`, cx: x, cy: centerY, r: 3.2, fill: color }),
+          )
+          if (hasAfter) {
+            nodes.push(h('path', { key: `out${index}`, d: `M ${x} ${centerY} L ${x} ${height}`, stroke: color, strokeWidth: 2, fill: 'none' }))
+          }
+        } else if (hasBefore && hasAfter) {
+          nodes.push(h('path', { key: `line${index}`, d: `M ${x} 0 L ${x} ${height}`, stroke: color, strokeWidth: 2, fill: 'none' }))
+        } else if (hasBefore) {
+          // 泳道在这一行结束（例如分支的根提交），画到节点高度后收住。
+          nodes.push(h('path', { key: `end${index}`, d: `M ${x} 0 L ${x} ${centerY}`, stroke: color, strokeWidth: 2, fill: 'none', opacity: 0.6 }))
+        } else if (hasAfter) {
+          nodes.push(h('path', { key: `start${index}`, d: `M ${x} ${centerY} L ${x} ${height}`, stroke: color, strokeWidth: 2, fill: 'none' }))
+        }
+      }
+      // 合并提交的额外父提交：从节点画一条曲线落到新的泳道，向下继续。
+      for (const parent of row.parents.slice(1)) {
+        const target = row.after.indexOf(parent)
+        if (target === -1 || target === row.lane || target >= GRAPH_MAX_LANES) continue
+        const x1 = laneX(row.lane)
+        const x2 = laneX(target)
+        nodes.push(
+          h('path', {
+            key: `merge${target}`,
+            d: `M ${x1} ${centerY + 3} C ${x1} ${centerY + 12} ${x2} ${height - 8} ${x2} ${height}`,
+            stroke: colorOf(target),
+            strokeWidth: 2,
+            fill: 'none',
+            opacity: 0.9,
+          }),
+        )
+      }
+      return h('svg', { width, height, viewBox: `0 0 ${width} ${height}`, 'aria-hidden': 'true', focusable: 'false' }, nodes)
     }
 
     /**
@@ -1867,12 +1976,14 @@ window.__ModuleLoader__.load({
               if (!Number.isFinite(time) || time < cutoff) continue
             }
             if (needle !== '') {
+              const files = Array.isArray(commit.files) ? commit.files : []
               const hit =
                 commit.subject.toLowerCase().includes(needle) ||
                 commit.author.toLowerCase().includes(needle) ||
                 commit.repo.toLowerCase().includes(needle) ||
                 commit.short.toLowerCase().includes(needle) ||
-                commit.refs.toLowerCase().includes(needle)
+                commit.refs.toLowerCase().includes(needle) ||
+                files.some((file) => String(file).toLowerCase().includes(needle))
               if (!hit) continue
             }
             if (commit.remoteOnly === true) remote.push(commit)
@@ -2604,15 +2715,6 @@ window.__ModuleLoader__.load({
               ),
             )
           }
-          if (query.trim() !== '') {
-            changesSummaryParts.push(
-              h(
-                'span',
-                { className: 'gm-summary-part gm-summary-filtered', key: 'filtered' },
-                text(t, 'summary.filtered', { count: visibleFileCount }),
-              ),
-            )
-          }
 
           const changesWarnings = []
           if (activeHiddenChangeRepos.length > 0) {
@@ -2654,14 +2756,25 @@ window.__ModuleLoader__.load({
             changesWarnings,
             h(
               'div',
-              { className: 'gm-search' },
-              h('input', {
-                type: 'search',
-                value: query,
-                placeholder: t('changes.filterPlaceholder'),
-                'aria-label': t('changes.filterPlaceholder'),
-                onChange: (event) => setQuery(event.currentTarget.value),
-              }),
+              { className: 'gm-bar-right' },
+              query.trim() === ''
+                ? null
+                : h(
+                    'span',
+                    { className: 'gm-meta gm-summary-filtered' },
+                    text(t, 'summary.filtered', { count: visibleFileCount }),
+                  ),
+              h(
+                'div',
+                { className: 'gm-search' },
+                h('input', {
+                  type: 'search',
+                  value: query,
+                  placeholder: t('changes.filterPlaceholder'),
+                  'aria-label': t('changes.filterPlaceholder'),
+                  onChange: (event) => setQuery(event.currentTarget.value),
+                }),
+              ),
             ),
           )
 
@@ -2855,10 +2968,37 @@ window.__ModuleLoader__.load({
           )
         }
 
+        // 单仓库时在行首渲染提交树；查询/时间筛选期间保留占位宽度但隐藏连线，避免行在输入时左右跳动。
+        let graphSequence = null
+        if (repos.length === 1) {
+          const remoteCommits = []
+          const localCommits = []
+          for (const commit of data?.commits ?? []) {
+            if (activeHiddenRepos.includes(commit.repo)) continue
+            if (commit.remoteOnly === true) remoteCommits.push(commit)
+            else localCommits.push(commit)
+          }
+          graphSequence = [
+            ...(collapsedRemote ? [] : remoteCommits),
+            ...(collapsedLocal ? [] : localCommits),
+          ]
+        }
+        const graphLayout = graphSequence === null ? null : computeCommitGraph(graphSequence)
+        const graphWidth =
+          graphLayout === null ? 0 : Math.min(graphLayout.maxLanes, GRAPH_MAX_LANES) * GRAPH_LANE_WIDTH + 2
+        const graphVisible = graphLayout !== null && query.trim() === '' && timeRange === 'all'
+        const graphIndex = new Map()
+        if (graphSequence !== null) {
+          graphSequence.forEach((commit, index) => graphIndex.set(`${commit.repo}:${commit.hash}`, index))
+        }
+
         const items = []
         const pushRow = (commit) => {
           const key = getDetailKey(commit)
           const expanded = expandedKey === key
+          const commitGraphIndex = graphVisible ? graphIndex.get(`${commit.repo}:${commit.hash}`) : undefined
+          const graphRow =
+            graphVisible && commitGraphIndex !== undefined ? graphLayout.rows[commitGraphIndex] : null
           const pending = pendingExpandKey === key
           const menuOpen = chatMenu !== null && chatMenu.key === key
           const color = colors.get(commit.repo) ?? PALETTE[0]
@@ -2874,6 +3014,7 @@ window.__ModuleLoader__.load({
                 {
                   className: [
                     'gm-row',
+                    graphLayout === null ? '' : 'gm-row-graph',
                     expanded ? 'gm-row-open' : '',
                     pending ? 'gm-row-pending' : '',
                     commit.remoteOnly === true ? 'gm-row-remote' : '',
@@ -2923,6 +3064,13 @@ window.__ModuleLoader__.load({
                   'data-gm-repo': commit.repo,
                   'data-gm-head': isHeadRef(commit.refs) ? 'true' : undefined,
                 },
+                graphLayout === null
+                  ? null
+                  : h(
+                      'span',
+                      { className: 'gm-graph', style: { width: `${graphWidth}px` }, 'aria-hidden': 'true' },
+                      graphRow === null ? null : renderCommitGraph(graphRow, graphWidth, graphLayout.maxLanes),
+                    ),
                 h('span', { className: 'gm-rail', style: { background: color } }),
                 h(
                   'div',
@@ -3139,7 +3287,6 @@ window.__ModuleLoader__.load({
             'div',
             { className: 'gm-bar' },
             h('div', { className: 'gm-meta gm-summary' }, data === null ? null : summaryParts),
-            query.trim() !== '' ? h('span', { className: 'gm-meta' }, text(t, 'summary.filtered', { count: items.length })) : null,
             activeHiddenRepos.length > 0
               ? h('span', { className: 'gm-meta' }, text(t, 'summary.hidden', { count: activeHiddenRepos.length }))
               : null,
@@ -3158,29 +3305,40 @@ window.__ModuleLoader__.load({
               : null,
             loading && data !== null ? h('span', { className: 'gm-meta' }, t('state.loading')) : null,
             h(
-              'select',
-              {
-                className: 'gm-range',
-                value: timeRange,
-                'aria-label': t('range.label'),
-                title: t('range.label'),
-                onChange: (event) => setTimeRange(event.currentTarget.value),
-              },
-              h('option', { value: 'all', key: 'all' }, t('range.all')),
-              h('option', { value: 'today', key: 'today' }, t('range.today')),
-              h('option', { value: '3d', key: '3d' }, t('range.3d')),
-              h('option', { value: '7d', key: '7d' }, t('range.7d')),
-            ),
-            h(
               'div',
-              { className: 'gm-search' },
-              h('input', {
-                type: 'search',
-                value: query,
-                placeholder: t('filter.placeholder'),
-                'aria-label': t('filter.placeholder'),
-                onChange: (event) => setQuery(event.currentTarget.value),
-              }),
+              { className: 'gm-bar-right' },
+              h(
+                'select',
+                {
+                  className: 'gm-range',
+                  value: timeRange,
+                  'aria-label': t('range.label'),
+                  title: t('range.label'),
+                  onChange: (event) => setTimeRange(event.currentTarget.value),
+                },
+                h('option', { value: 'all', key: 'all' }, t('range.all')),
+                h('option', { value: 'today', key: 'today' }, t('range.today')),
+                h('option', { value: '3d', key: '3d' }, t('range.3d')),
+                h('option', { value: '7d', key: '7d' }, t('range.7d')),
+              ),
+              query.trim() === ''
+                ? null
+                : h(
+                    'span',
+                    { className: 'gm-meta gm-summary-filtered' },
+                    text(t, 'summary.filtered', { count: items.length }),
+                  ),
+              h(
+                'div',
+                { className: 'gm-search' },
+                h('input', {
+                  type: 'search',
+                  value: query,
+                  placeholder: t('filter.placeholder'),
+                  'aria-label': t('filter.placeholder'),
+                  onChange: (event) => setQuery(event.currentTarget.value),
+                }),
+              ),
             ),
           ),
           chips,
